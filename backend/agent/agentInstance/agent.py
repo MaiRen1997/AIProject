@@ -5,16 +5,19 @@
 """
 
 import os
+from pathlib import Path
 from dotenv import load_dotenv
 
 from langchain_openai import ChatOpenAI
-# from langgraph.prebuilt import create_react_agent
 from langchain.agents import create_agent
 from langgraph.checkpoint.memory import InMemorySaver
-from langchain_core.messages import SystemMessage
-
+from langchain_core.messages import SystemMessage, AIMessageChunk
+from utils.log_util import logger
 # 加载 .env 文件
-load_dotenv()
+BACKEND_ROOT = Path(__file__).resolve().parents[2]
+APP_ENV = os.getenv("APP_ENV", "dev")
+load_dotenv(BACKEND_ROOT / f".env.{APP_ENV}")
+load_dotenv(BACKEND_ROOT / ".env")
 
 # 从 .env 文件读取配置
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
@@ -23,28 +26,33 @@ DEEPSEEK_API_BASE_URL = os.getenv("DEEPSEEK_API_BASE_URL")
 # ============= 定义工具 =============
 from agent.tools.getReciple import get_sulfuric_acid_standards
 
-# 工具列表 (移除了不存在的工具，保留存在的)
+# 工具列表
 tools = [get_sulfuric_acid_standards]
 
-# ============= 初始化LLM =============
+# ============= 初始化LLM（启用流式） =============
 def create_llm():
-    """创建LLM实例，使用DeepSeek API"""
+    """创建LLM实例，使用DeepSeek API，启用流式输出"""
+    if not DEEPSEEK_API_KEY:
+        raise RuntimeError(
+            f"DEEPSEEK_API_KEY is not configured. Expected it in {BACKEND_ROOT / f'.env.{APP_ENV}'} "
+            "or the process environment."
+        )
+
     return ChatOpenAI(
         api_key=DEEPSEEK_API_KEY,
         base_url=DEEPSEEK_API_BASE_URL,
         model="deepseek-chat",
         temperature=0.7,
+        streaming=True,  # ✅ 关键：启用流式输出
     )
 
 # ============= 创建Agent =============
-# 全局 checkpointer 实例，确保跨请求内存持久化
 _checkpointer = InMemorySaver()
 
 def create_agent_instance():
-    """使用 create_react_agent 创建 Agent"""
+    """使用 create_agent 创建 Agent"""
     llm = create_llm()
-    
-    # 定义全能助手系统提示词 (Multi-functional Identity)
+
     system_modifier_text = (
         "你是一个全能的智能助手，能够高效处理多样化的任务，包括：\n"
         "- 【行政与沟通】：协助用户撰写和发送电子邮件。\n"
@@ -54,51 +62,91 @@ def create_agent_instance():
         "1. 身份切换：根据用户的需求自动适配角色（如秘书、研究员、实验专家）。\n"
         "2. 安全与严谨：在涉及化学配制等风险操作时，必须调用相关标准工具获取参考，并基于数据进行严谨的逻辑推理。\n"
         "3. 交互体验：回答应清晰、专业，并在复杂操作前提供必要的安全提醒。"
+        "3. 回复原则：你应该先判断用户输入的是什么语言，然后将答案，翻译成相应的语言进行回答。"
     )
 
-    # 兼容性处理：尝试使用 state_modifier 或 messages_modifier
     try:
-        # 最新版 LangGraph 使用 state_modifier
         return create_agent(
-            llm, 
-            tools, 
+            llm,
+            tools,
             checkpointer=_checkpointer,
             state_modifier=system_modifier_text
         )
     except TypeError:
         try:
-            # 较旧版使用 messages_modifier
             return create_agent(
-                llm, 
-                tools, 
+                llm,
+                tools,
                 checkpointer=_checkpointer,
                 messages_modifier=system_modifier_text
             )
         except TypeError:
-            # 如果都不支持，创建一个基础 Agent
             return create_agent(
-                llm, 
-                tools, 
+                llm,
+                tools,
                 checkpointer=_checkpointer
             )
 
-# 创建全局 Agent 实例
 _agent_instance = create_agent_instance()
 
-# ============= 主函数 =============
-def run_agent(user_input: str, thread_id: str = "default_thread"):
-    """运行Agent"""
+# ============= 流式运行函数 =============
+async def run_agent_stream(user_input: str, thread_id: str = "default_thread"):
+    """
+    流式运行Agent，逐步返回输出
+
+    Args:
+        user_input: 用户输入
+        thread_id: 会话线程ID
+
+    Yields:
+        str: 逐步输出的内容块
+    """
     config = {"configurable": {"thread_id": thread_id}}
-    
     input_messages = {"messages": [("user", user_input)]}
 
     print(f"\n用户输入: {user_input}")
     print("-" * 50)
 
-    # 执行Agent
-    result = _agent_instance.invoke(input_messages, config)
+    try:
+        # 使用 astream_events 获取更细粒度的流式事件
+        async for event in _agent_instance.astream_events(
+            input_messages,
+            config,
+            version="v1"
+        ):
+            # 监听 LLM 流式输出事件
+            if event["event"] == "on_chat_model_stream":
+                chunk = event["data"]["chunk"]
+                if chunk.content:
+                    yield chunk.content
+                    print(chunk.content, end="", flush=True)
 
-    # 获取最后一条消息（Agent的响应）
+            # 可选：监听工具调用事件
+            elif event["event"] == "on_tool_start":
+                logger.info(f"开始调用工具: {event['name']}")
+
+            elif event["event"] == "on_tool_end":
+                logger.info(f"工具调用完成: {event['name']}")
+
+        print("\n" + "-" * 50)
+        print("流式输出完成")
+
+    except Exception as e:
+        error_msg = f"Agent 运行出错: {str(e)}"
+        print(error_msg)
+        yield f"\n[错误]: {error_msg}\n"
+
+
+# ============= 保留原有的非流式函数（可选） =============
+def run_agent(user_input: str, thread_id: str = "default_thread"):
+    """非流式运行Agent（向后兼容）"""
+    config = {"configurable": {"thread_id": thread_id}}
+    input_messages = {"messages": [("user", user_input)]}
+
+    print(f"\n用户输入: {user_input}")
+    print("-" * 50)
+
+    result = _agent_instance.invoke(input_messages, config)
     final_response = result["messages"][-1]
 
     print(f"\nAgent响应: {final_response.content}")

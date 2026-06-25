@@ -8,17 +8,18 @@
             type="primary"
             class="new-chat-btn"
             icon="Plus"
-            @click="clearChat"
+            @click="generateThreadId"
             >新建对话</el-button
           >
+            <!-- @click="clearChat" -->
         </div>
         <div class="session-list" v-loading="sessionLoading">
           <div
-            v-for="session in sessionList"
-            :key="session.sessionId"
+            v-for="(session,index) in sessionList"
+            :key="index"
             :class="[
               'session-item',
-              currentSessionId === session.sessionId ? 'active' : '',
+              currentSessionId === session?.sessionId ? 'active' : '',
             ]"
             @click="loadSession(session.sessionId)"
           >
@@ -65,7 +66,7 @@
                 @click="openConfigDialog"
               ></el-button>
             </el-tooltip>
-            <el-select
+            <!-- <el-select
               v-model="currentModelId"
               placeholder="选择模型"
               size="large"
@@ -77,7 +78,7 @@
                 :label="`${item.provider}/${item.modelCode}`"
                 :value="item.modelId"
               />
-            </el-select>
+            </el-select> -->
           </div>
         </div>
 
@@ -230,9 +231,10 @@
               :rows="3"
               resize="none"
               placeholder="请输入您的问题... (Enter 发送，Shift + Enter 换行)"
-              @keydown.enter.exact.prevent="handleSend"
+              @keydown.enter.exact.prevent="getAIMessage"
               :disabled="loading"
             />
+              <!-- @keydown.enter.exact.prevent="handleSend" -->
             <div
               class="selected-images"
               v-if="userConfig.visionEnabled == '0' && inputImages.length"
@@ -426,7 +428,9 @@ import { Picture, DocumentCopy } from "@element-plus/icons-vue";
 import { v4 as uuidv4 } from "uuid";
 import { useResizeObserver } from "@vueuse/core";
 import { getUseMonaco } from 'markstream-vue'
-
+import { generateSessionID } from '@/api/ai/addSession'
+import * as Api from '@/api/ai/chemical'
+import { chatWithAgent, chatWithAgentStream } from '@/api/ai/agentChat'
 getUseMonaco()
 
 const { proxy } = getCurrentInstance();
@@ -450,9 +454,112 @@ const isAutoScroll = ref(true);
 const currentSessionAgentData = ref(null);
 const isProgrammaticScroll = ref(false);
 let scrollTimeout = null;
-
+const generateThreadId = async () => {
+  const res = await generateSessionID()
+  currentSessionId.value = res.data;
+  sessionList.value.push({
+    sessionId: res.data,
+    sessionTitle: "新对话",
+    createdAt: new Date().toISOString(),
+  })
+  return res.data
+}
+const getAIMessage = async () => {
+  console.log("getAIMessage called with input:", inputMessage.value);
+  
+  if (!currentSessionId.value) {
+    await generateThreadId()
+  }
+  
+  messageList.value.push({
+    role: "user",
+    content: inputMessage.value,
+  })
+  
+  loading.value = true;
+  
+  const aiMsgIndex = messageList.value.push({
+    role: "assistant",
+    content: "",
+  }) - 1;
+  
+  console.log("Added AI message at index:", aiMsgIndex);
+  
+  scrollToBottom();
+  isAutoScroll.value = true;
+  
+  try {
+    const response = await chatWithAgentStream({
+      message: inputMessage.value,
+      sessionId: currentSessionId.value,
+    });
+    
+    console.log("Response received:", response);
+    
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let aiContent = "";
+    let buffer = "";
+    
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) {
+        break;
+      }
+      
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split("\n");
+      buffer = lines.pop(); // 保留最后一个可能不完整的行
+      
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        const data = parseStreamLine(line);
+        if (!data) continue;
+        if (data.type === "done") {
+          console.log("Received done signal");
+          break;
+        }
+        if (data.type === "error") {
+          proxy.$modal.msgError(data.error);
+          break;
+        }
+        if (data.type === "content") {
+          aiContent += data.content || "";
+          messageList.value[aiMsgIndex].content = aiContent;
+        }
+      }
+    }
+  } catch (err) {
+    console.error("Error in getAIMessage:", err);
+    proxy.$modal.msgError("请求失败: " + err.message);
+  } finally {
+    loading.value = false;
+    inputMessage.value = "";
+  }
+}
 function generateSessionId() {
   return uuidv4();
+}
+
+function parseStreamLine(line) {
+  const trimmedLine = line.trim();
+  if (!trimmedLine) return null;
+
+  const payloadText = trimmedLine.startsWith("data:")
+    ? trimmedLine.slice(5).trim()
+    : trimmedLine;
+
+  if (!payloadText) return null;
+  if (payloadText === "[DONE]") return { type: "done" };
+  if (payloadText.startsWith("[ERROR]")) {
+    return { type: "error", error: payloadText.replace(/^\[ERROR\]:?\s*/, "") };
+  }
+
+  try {
+    return JSON.parse(payloadText);
+  } catch (e) {
+    return { type: "content", content: payloadText };
+  }
 }
 
 const chatConfig = reactive({
@@ -677,12 +784,13 @@ async function sendRequest(text, images) {
       for (const line of lines) {
         if (!line.trim()) continue;
         try {
-          const data = JSON.parse(line);
+          const data = parseStreamLine(line);
+          if (!data) continue;
           if (data.type === "content") {
-            aiContent += data.content;
+            aiContent += data.content || "";
             messageList.value[aiMsgIndex].content = aiContent;
           } else if (data.type === "reasoning") {
-            aiReasoning += data.content;
+            aiReasoning += data.content || "";
             messageList.value[aiMsgIndex].reasoningContent = aiReasoning;
           } else if (data.type === "meta") {
             currentSessionId.value = data.session_id;
@@ -698,6 +806,8 @@ async function sendRequest(text, images) {
             messageList.value[aiMsgIndex].metrics = data.metrics;
           } else if (data.type === "error") {
             proxy.$modal.msgError(data.error);
+          } else if (data.type === "done") {
+            break;
           }
         } catch (e) {
           console.error("Parse error", e);

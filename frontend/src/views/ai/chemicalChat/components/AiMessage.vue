@@ -11,11 +11,18 @@
         >
       </div>
       <div v-show="isReasoningExpanded" class="reasoning-content">
-        <MarkdownRender :content="reasoningContent" :is-dark="isDark" />
+        <!-- <MarkdownRender :content="reasoningContent" :is-dark="isDark" /> -->
       </div>
     </div>
     <div class="ai-message-content">
-      <MarkdownRender :content="content" :is-dark="isDark" />
+      <MarkdownRender
+        v-if="content"
+        mode="chat"
+        :content="normalizedContent"
+        :is-dark="isDark"
+        :final="!loading"
+      />
+      <div v-else class="empty-content">暂无内容</div>
     </div>
     <div
       v-if="loading && !content && !reasoningContent"
@@ -29,11 +36,11 @@
 </template>
 
 <script setup>
-import { computed, ref } from "vue";
-import { MarkdownRender } from "markstream-vue";
-import { useDark } from "@vueuse/core";
-import { enableKatex, enableMermaid } from "markstream-vue";
+import { computed, ref, onMounted, watch } from "vue";
+import { ArrowRight } from "@element-plus/icons-vue";
+import { MarkdownRender, enableKatex, enableMermaid } from "markstream-vue";
 import "markstream-vue/index.css";
+import { useDark } from "@vueuse/core";
 import "katex/dist/katex.min.css";
 
 enableMermaid();
@@ -57,14 +64,45 @@ const props = defineProps({
 });
 
 const isReasoningExpanded = ref(true);
+const debug = true; // 临时调试开关，渲染原始内容以便排查
 
 const isThinkingComplete = computed(() => {
   return !!props.content;
 });
 
+const normalizedContent = computed(() => normalizeMarkdown(props.content));
+
+function normalizeMarkdown(content) {
+  return String(content || "")
+    .replace(/\r\n/g, "\n")
+    .replace(/\\n/g, "\n")
+    .replace(/([:|])-([:|])/g, "$1---$2")
+    .replace(/([:|])\u2014([:|])/g, "$1---$2")
+    .replace(/^\u2014$/gm, "---");
+}
+
 function toggleReasoning() {
   isReasoningExpanded.value = !isReasoningExpanded.value;
 }
+
+onMounted(() => {
+  console.log("AiMessage mounted");
+  console.log("MarkdownRender component:", MarkdownRender);
+});
+
+// watch(
+//   () => props.content,
+//   (v) => {
+//     if (debug) console.log("props.content changed:", v);
+//   },
+// );
+
+watch(
+  () => props.reasoningContent,
+  (v) => {
+    if (debug) console.log("props.reasoningContent changed:", v);
+  },
+);
 </script>
 
 <style lang="scss">
