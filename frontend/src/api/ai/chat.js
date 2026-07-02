@@ -51,3 +51,29 @@ export function cancelChatRun(runId) {
     },
   });
 }
+
+// 接入人工客服
+export function connectHumanSupport(data) {
+  return request({
+    url: "/ai/chat/human/connect",
+    method: "post",
+    data,
+  });
+}
+
+// 发送人工客服消息
+export function sendHumanSupportMessage(data) {
+  return request({
+    url: "/ai/chat/human/message",
+    method: "post",
+    data,
+  });
+}
+
+// 获取人工客服状态
+export function getHumanSupportStatus(sessionId) {
+  return request({
+    url: "/ai/chat/human/status/" + sessionId,
+    method: "get",
+  });
+}
