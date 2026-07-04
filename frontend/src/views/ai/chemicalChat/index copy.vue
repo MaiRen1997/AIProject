@@ -46,34 +46,18 @@
             v-if="sessionList.length === 0 && !sessionLoading"
             class="empty-session"
           >
-            暂无对话历史
+            暂无历史对话
           </div>
         </div>
       </el-aside>
 
-      <!-- 主要区域：对话框 -->
+      <!-- 主区域：对话框 -->
       <el-main class="chat-main">
         <div class="chat-header">
           <div class="header-left">
             <span class="header-title">AI 智能助手</span>
-            <el-tag
-              class="support-status-tag"
-              size="small"
-              :type="humanSupportMode ? 'success' : 'info'"
-              effect="plain"
-            >
-              {{ humanSupportMode ? humanSupportLabel : aiSupportLabel }}
-            </el-tag>
           </div>
           <div class="header-right">
-            <el-button
-              :type="humanSupportMode ? 'success' : 'warning'"
-              plain
-              style="margin-right: 10px"
-              @click="toggleHumanSupport"
-            >
-              {{ humanSupportMode ? backToAiLabel : transferHumanLabel }}
-            </el-button>
             <el-tooltip content="全局参数配置" placement="bottom">
               <el-button
                 icon="Setting"
@@ -84,7 +68,7 @@
             </el-tooltip>
             <!-- <el-select
               v-model="currentModelId"
-              placeholder="閫夋嫨妯″瀷"
+              placeholder="选择模型"
               size="large"
               style="width: 210px"
             >
@@ -108,8 +92,8 @@
               <div class="welcome-icon">
                 <el-icon size="60"><Service /></el-icon>
               </div>
-              <h2>你好，我是你的AI助手</h2>
-              <p>请在下方输入问题开始对话..</p>
+              <h2>你好！我是你的 AI 助手</h2>
+              <p>请在下方输入问题开始对话...</p>
             </div>
 
             <div
@@ -122,14 +106,14 @@
             >
               <div class="message-avatar">
                 <el-avatar
-                  :icon="getAvatarIcon(msg)"
+                  :icon="msg.role === 'user' ? 'UserFilled' : 'Service'"
                   :size="40"
-                  :class="getAvatarClass(msg)"
+                  :class="msg.role === 'user' ? 'avatar-user' : 'avatar-ai'"
                 ></el-avatar>
               </div>
               <div class="message-content-wrapper">
                 <div class="message-sender">
-                  {{ getMessageSender(msg) }}
+                  {{ msg.role === "user" ? "我" : "AI 助手" }}
                   <span class="message-time" v-if="msg.createdAt">{{
                     formatTime(msg.createdAt)
                   }}</span>
@@ -202,14 +186,14 @@
                           msg.metrics?.totalTokens !== null &&
                           msg.metrics?.totalTokens !== undefined
                         "
-                        >总计 {{ msg.metrics.totalTokens }} tokens</span
+                        >总 {{ msg.metrics.totalTokens }} tokens</span
                       >
                       <span
                         v-if="
                           msg.metrics?.reasoningTokens !== null &&
                           msg.metrics?.reasoningTokens !== undefined
                         "
-                        > 推理 {{ msg.metrics.reasoningTokens }} tokens</span
+                        >推理 {{ msg.metrics.reasoningTokens }} tokens</span
                       >
                     </div>
                   </div>
@@ -222,6 +206,15 @@
                     >
                       {{ currentSessionAgentData.model.provider }} /
                       {{ currentSessionAgentData.model.id }}
+                    </el-tag>
+                    <el-tag
+                      size="small"
+                      type="info"
+                      effect="plain"
+                      v-else-if="currentModelInfo"
+                    >
+                      {{ currentModelInfo.provider }} /
+                      {{ currentModelInfo.modelCode }}
                     </el-tag>
                   </div>
                 </div>
@@ -238,38 +231,16 @@
               :rows="3"
               resize="none"
               placeholder="请输入您的问题... (Enter 发送，Shift + Enter 换行)"
-              @keydown.enter.exact.prevent="handleSend"
+              @keydown.enter.exact.prevent="getAIMessage"
               :disabled="loading"
             />
-              <!-- @keydown.enter.exact.prevent="handleSend" -->
-            <div
-              class="selected-images"
-              v-if="userConfig.visionEnabled == '0' && inputImages.length"
-            >
-              <el-image
-                v-for="(img, idx) in inputImages"
-                :key="idx"
-                :src="getImageUrl(img)"
-                :preview-src-list="inputImages.map(getImageUrl)"
-                fit="cover"
-                class="selected-image-item"
-              />
-            </div>
             <div class="input-actions">
               <div class="left-actions">
-                <el-tooltip
-                  v-if="userConfig.visionEnabled == '0'"
-                  content="上传图片"
-                  placement="top"
-                >
-                  <el-button
-                    circle
-                    text
-                    :icon="Picture"
-                    @click="triggerImageUpload"
-                  />
-                </el-tooltip>
                 <el-button
+                  v-if="
+                    currentModelInfo &&
+                    currentModelInfo.supportReasoning === 'Y'
+                  "
                   class="toggle-chip"
                   size="small"
                   :type="chatConfig.isReasoning ? 'primary' : ''"
@@ -279,7 +250,7 @@
                   <template #icon>
                     <svg-icon icon-class="deepthink" />
                   </template>
-                  推理模式
+                  深度思考
                 </el-button>
               </div>
               <el-button
@@ -297,129 +268,17 @@
         </div>
       </el-main>
     </el-container>
-
-    <el-dialog
-      v-model="showConfigDialog"
-      title="用户全局配置"
-      width="700px"
-      append-to-body
-      class="chat-config-dialog"
-    >
-      <el-form :model="editingUserConfig" label-width="150px">
-        <el-row :gutter="20">
-          <el-col :span="12">
-            <el-form-item label="默认温度">
-              <el-input-number
-                v-model="editingUserConfig.temperature"
-                :min="0"
-                :max="2"
-                :step="0.1"
-                :precision="1"
-                placeholder="默认温度"
-                style="width: 100%"
-              />
-            </el-form-item>
-          </el-col>
-          <el-col :span="12">
-            <el-form-item label="附带历史消息">
-              <el-switch
-                active-value="0"
-                inactive-value="1"
-                v-model="editingUserConfig.addHistoryToContext"
-              />
-            </el-form-item>
-          </el-col>
-          <el-col :span="12">
-            <el-form-item
-              label="历史消息条数"
-              v-if="editingUserConfig.addHistoryToContext == '0'"
-            >
-              <el-input-number
-                v-model="editingUserConfig.numHistoryRuns"
-                :min="1"
-                :max="20"
-                placeholder="历史消息条数"
-                style="width: 100%"
-              />
-            </el-form-item>
-          </el-col>
-          <el-col :span="12">
-            <el-form-item label="默认显示指标">
-              <el-switch
-                active-value="0"
-                inactive-value="1"
-                v-model="editingUserConfig.metricsDefaultVisible"
-              />
-            </el-form-item>
-          </el-col>
-          <el-col :span="12">
-            <el-form-item label="开启视觉能力">
-              <el-switch
-                active-value="0"
-                inactive-value="1"
-                v-model="editingUserConfig.visionEnabled"
-              />
-            </el-form-item>
-          </el-col>
-          <el-col :span="12">
-            <el-form-item
-              label="图片最大大小"
-              v-if="editingUserConfig.visionEnabled"
-            >
-              <el-input-number
-                v-model="editingUserConfig.imageMaxSizeMb"
-                :min="1"
-                :max="50"
-                placeholder="图片大小"
-                style="width: 100%"
-              >
-                <template #suffix>
-                  <span>MB</span>
-                </template>
-              </el-input-number>
-            </el-form-item>
-          </el-col>
-          <el-col :span="24">
-            <el-form-item label="系统提示词">
-              <el-input
-                v-model="editingUserConfig.systemPrompt"
-                type="textarea"
-                :rows="4"
-                placeholder="设置全局系统提示词"
-              />
-            </el-form-item>
-          </el-col>
-        </el-row>
-      </el-form>
-      <template #footer>
-        <span class="dialog-footer">
-          <el-button @click="showConfigDialog = false">取消</el-button>
-          <el-button type="primary" @click="handleSaveConfig">保存</el-button>
-        </span>
-      </template>
-    </el-dialog>
-    <input
-      v-if="userConfig.visionEnabled"
-      ref="imageInputRef"
-      type="file"
-      accept="image/*"
-      multiple
-      class="chat-image-input"
-      @change="handleImageInputChange"
-    />
   </div>
 </template>
 
 <script setup name="AiChat">
+import { listModelAll } from "@/api/ai/model";
 import {
   listChatSession,
-  delChatSession,
   getChatSession,
   getUserChatConfig,
   saveUserChatConfig,
   cancelChatRun,
-  connectHumanSupport,
-  sendHumanSupportMessage,
 } from "@/api/ai/chat";
 import { getToken } from "@/utils/auth";
 import AiMessage from "./components/AiMessage.vue";
@@ -434,11 +293,8 @@ getUseMonaco()
 
 const { proxy } = getCurrentInstance();
 
-const aiSupportLabel = "\u0041\u0049\u5ba2\u670d";
-const humanSupportLabel = "\u4eba\u5de5\u5ba2\u670d";
-const transferHumanLabel = "\u8f6c\u4eba\u5de5";
-const backToAiLabel = "\u8fd4\u56de\u0041\u0049";
-
+const modelOptions = ref([]);
+const currentModelId = ref(undefined);
 const messageList = ref([]);
 const inputMessage = ref("");
 const inputImages = ref([]);
@@ -454,8 +310,6 @@ const abortController = ref(null);
 const currentRunId = ref(null);
 const isAutoScroll = ref(true);
 const currentSessionAgentData = ref(null);
-const humanSupportMode = ref(false);
-const humanSupportSession = ref(null);
 const isProgrammaticScroll = ref(false);
 let scrollTimeout = null;
 const generateThreadId = async () => {
@@ -599,6 +453,11 @@ const editingUserConfig = reactive({
   updateTime: undefined,
 });
 
+const currentModelInfo = computed(() => {
+  if (!currentModelId.value) return null;
+  return modelOptions.value.find((m) => m.modelId === currentModelId.value);
+});
+
 function loadUserConfig() {
   getUserChatConfig().then((res) => {
     if (res.data) {
@@ -656,29 +515,31 @@ function formatTime(timeStr) {
   }
 }
 
-function getMessageSender(msg) {
-  if (msg.role === "user") return "\u6211";
-  if (msg.role === "support") return humanSupportLabel;
-  if (msg.role === "system") return "\u7cfb\u7edf";
-  return "\u0041\u0049 \u52a9\u624b";
+function getModels() {
+  listModelAll().then((res) => {
+    modelOptions.value = res.data;
+    if (modelOptions.value.length > 0) {
+      currentModelId.value = modelOptions.value[0].modelId;
+      // 初始化配置
+      const model = modelOptions.value[0];
+      chatConfig.temperature = model.temperature;
+    }
+  });
 }
 
-function getAvatarIcon(msg) {
-  if (msg.role === "user") return "UserFilled";
-  return "Service";
-}
-
-function getAvatarClass(msg) {
-  if (msg.role === "user") return "avatar-user";
-  if (msg.role === "support") return "avatar-support";
-  return "avatar-ai";
-}
+// 监听模型切换，更新默认配置
+watch(currentModelId, (newVal) => {
+  const model = modelOptions.value.find((m) => m.modelId === newVal);
+  if (model) {
+    chatConfig.temperature = model.temperature;
+  }
+});
 
 function getSessions() {
   sessionLoading.value = true;
   listChatSession().then((res) => {
     sessionList.value = res.data;
-    // 鎸夊垱寤烘椂闂村€掑簭鎺掑簭
+    // 按创建时间倒序排序
     if (sessionList.value && sessionList.value.length > 0) {
       sessionList.value.sort((a, b) => {
         const dateA = new Date(a.createdAt).getTime();
@@ -694,8 +555,6 @@ function loadSession(sessionId) {
   if (currentSessionId.value === sessionId) return;
   currentSessionId.value = sessionId;
   messageList.value = [];
-  humanSupportMode.value = false;
-  humanSupportSession.value = null;
   loading.value = true;
   getChatSession(sessionId).then((res) => {
     messageList.value = res.data.messages;
@@ -708,99 +567,21 @@ function loadSession(sessionId) {
 
 function handleDeleteSession(sessionId) {
   proxy.$modal
-    .confirm("是否确认删除该会话？", "删除会话", {
-      type: "warning",
-    })
+    .confirm("是否确认删除该会话？")
     .then(function () {
-      return delChatSession(sessionId);
     })
     .then(() => {
-      getSessions();
-      if (currentSessionId.value === sessionId) {
-        clearChat();
-      }
-      proxy.$modal.msgSuccess("删除成功");
+      
     })
     .catch(() => {});
 }
 
-function appendHumanSupportMessages(session) {
-  const supportMessages = session?.messages || [];
-  const lastSupportMessage = [...supportMessages].reverse().find((item) => item.role === "support");
-  if (lastSupportMessage) {
-    messageList.value.push({
-      role: "support",
-      content: lastSupportMessage.content,
-      createdAt: lastSupportMessage.createdAt,
-    });
-  }
-  scrollToBottom();
-}
-
-async function connectToHumanSupport(reason = "manual", lastMessage = "") {
-  if (!currentSessionId.value) {
-    await generateThreadId();
-  }
-  const res = await connectHumanSupport({
-    sessionId: currentSessionId.value,
-    reason,
-    lastMessage,
-  });
-  humanSupportMode.value = true;
-  humanSupportSession.value = res.data;
-  appendHumanSupportMessages(res.data);
-}
-
-async function toggleHumanSupport() {
-  if (humanSupportMode.value) {
-    humanSupportMode.value = false;
-    messageList.value.push({
-      role: "system",
-      content: "\u5df2\u5207\u56de AI \u5ba2\u670d\u3002",
-      createdAt: new Date().toISOString(),
-    });
-    scrollToBottom();
+async function sendRequest(text, images) {
+  if (!currentModelId.value) {
+    proxy.$modal.msgError("请先选择模型");
     return;
   }
 
-  await connectToHumanSupport("manual");
-}
-
-async function sendHumanMessage(text) {
-  if (!currentSessionId.value) {
-    await generateThreadId();
-  }
-  loading.value = true;
-  try {
-    const res = await sendHumanSupportMessage({
-      sessionId: currentSessionId.value,
-      message: text,
-    });
-    humanSupportMode.value = true;
-    humanSupportSession.value = res.data;
-    appendHumanSupportMessages(res.data);
-  } finally {
-    loading.value = false;
-  }
-}
-
-function handleHandoffEvent(data, aiMsgIndex) {
-  humanSupportMode.value = true;
-  humanSupportSession.value = data.support_session || data.supportSession || null;
-  if (!messageList.value[aiMsgIndex].content) {
-    messageList.value.splice(aiMsgIndex, 1);
-  }
-  messageList.value.push({
-    role: "support",
-    content:
-      data.message ||
-      "AI \u6682\u65f6\u65e0\u6cd5\u51c6\u786e\u56de\u7b54\uff0c\u5df2\u4e3a\u60a8\u8f6c\u63a5\u4eba\u5de5\u5ba2\u670d\u3002",
-    createdAt: new Date().toISOString(),
-  });
-  scrollToBottom();
-}
-
-async function sendRequest(text, images) {
   loading.value = true;
   const imageList = images ? images.slice() : [];
 
@@ -826,6 +607,7 @@ async function sendRequest(text, images) {
         },
         signal: abortController.value.signal,
         body: JSON.stringify({
+          modelId: currentModelId.value,
           message: text,
           images: imageList,
           sessionId: currentSessionId.value,
@@ -865,7 +647,7 @@ async function sendRequest(text, images) {
             messageList.value[aiMsgIndex].reasoningContent = aiReasoning;
           } else if (data.type === "meta") {
             currentSessionId.value = data.session_id;
-            // 濡傛灉鏄柊浼氳瘽锛屾爣璁伴渶瑕佸埛鏂板垪琛?
+            // 如果是新会话，标记需要刷新列表
             if (
               !sessionList.value.find((s) => s.sessionId === data.session_id)
             ) {
@@ -877,8 +659,6 @@ async function sendRequest(text, images) {
             messageList.value[aiMsgIndex].metrics = data.metrics;
           } else if (data.type === "error") {
             proxy.$modal.msgError(data.error);
-          } else if (data.type === "handoff") {
-            handleHandoffEvent(data, aiMsgIndex);
           } else if (data.type === "done") {
             break;
           }
@@ -888,13 +668,13 @@ async function sendRequest(text, images) {
       }
     }
 
-    // 鏁翠釜鍝嶅簲缁撴潫鍚庯紝濡傛灉闇€瑕佸垯鍒锋柊浼氳瘽鍒楄〃
+    // 整个响应结束后，如果需要则刷新会话列表
     if (needRefreshSessions) {
       getSessions();
     }
   } catch (err) {
     if (err.name === "AbortError") {
-      // 鐢ㄦ埛缁堟
+      // 用户终止
     } else {
       proxy.$modal.msgError("请求失败: " + err.message);
     }
@@ -909,8 +689,6 @@ function clearChat() {
   currentSessionId.value = generateSessionId();
   console.log("New session ID:", currentSessionId.value);
   currentSessionAgentData.value = null;
-  humanSupportMode.value = false;
-  humanSupportSession.value = null;
 }
 
 function copyText(text) {
@@ -941,7 +719,7 @@ async function handleImageInputChange(event) {
   const files = Array.from(event.target.files || []);
   if (!files.length) return;
   if (files.length + inputImages.value.length > 10) {
-    proxy.$modal.msgError("最多只能上传10张图片");
+    proxy.$modal.msgError("最多只能上传 10 张图片");
     return;
   }
   const maxSize = (userConfig.imageMaxSizeMb || 5) * 1024 * 1024;
@@ -954,7 +732,7 @@ async function handleImageInputChange(event) {
     }
   }
   try {
-    proxy.$modal.loading("正在上传图片..");
+    proxy.$modal.loading("正在上传图片，请稍候...");
     for (const file of files) {
       const form = new FormData();
       form.append("file", file);
@@ -986,17 +764,16 @@ async function handleSend() {
   const text = inputMessage.value.trim();
   const images = inputImages.value;
   if (!text && !images.length) return;
+  if (!currentModelId.value) {
+    proxy.$modal.msgError("请先选择模型");
+    return;
+  }
 
   const imageList = images.slice();
   messageList.value.push({ role: "user", content: text, images: imageList });
   inputMessage.value = "";
   inputImages.value = [];
   currentRunId.value = null;
-
-  if (humanSupportMode.value) {
-    await sendHumanMessage(text);
-    return;
-  }
 
   await sendRequest(text, imageList);
 }
@@ -1072,7 +849,7 @@ function handleMainAction() {
   }
 }
 
-// 鐩戝惉鍐呭鍙樺寲锛岃嚜鍔ㄦ粴鍔?
+// 监听内容变化，自动滚动
 useResizeObserver(chatContentRef, () => {
   if (isAutoScroll.value) {
     scrollToBottom();
@@ -1080,6 +857,7 @@ useResizeObserver(chatContentRef, () => {
 });
 
 onMounted(() => {
+  getModels();
   getSessions();
   loadUserConfig();
 });
@@ -1159,7 +937,7 @@ onMounted(() => {
 
       html.dark & {
         &.active {
-          // 浣跨敤鏇存繁涓€鐐圭殑鑳屾櫙鑹诧紝閬垮厤鏂囧瓧鐪嬩笉娓?
+          // 使用更深一点的背景色，避免文字看不清
           background-color: var(--el-color-primary-light-8);
           border-color: var(--el-color-primary-light-6);
 
@@ -1246,16 +1024,6 @@ onMounted(() => {
       font-weight: 600;
       color: var(--el-text-color-primary);
     }
-
-    .header-left {
-      display: flex;
-      align-items: center;
-      gap: 10px;
-    }
-
-    .support-status-tag {
-      flex-shrink: 0;
-    }
   }
 
   .chat-history {
@@ -1315,10 +1083,6 @@ onMounted(() => {
 
         .avatar-ai {
           background-color: var(--el-color-success);
-        }
-
-        .avatar-support {
-          background-color: var(--el-color-warning);
         }
       }
 

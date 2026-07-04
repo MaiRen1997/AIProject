@@ -46,17 +46,31 @@ async def agent_chat(request: Request, chat_req: AgentChatRequest):
     async def generate_stream():
         """生成流式响应"""
         try:
-            async for chunk in run_agent_stream(chat_req.message, thread_id=thread_id):
-                # 使用 Server-Sent Events 格式
+            if(chat_req.message_type): # AI 生成的回复
+                async for chunk in run_agent_stream(chat_req.message, thread_id=thread_id):
+                    # 使用 Server-Sent Events 格式
+                    yield _format_sse({
+                        "type": "content",
+                        "content": chunk,
+                    })
+
+                # 发送结束标记
                 yield _format_sse({
-                    "type": "content",
-                    "content": chunk,
+                    "type": "done",
+                })
+            else:
+                user_messages = "这是一段人工回复的文字"
+                async for chunk in user_messages:
+                    # 使用 Server-Sent Events 格式
+                    yield _format_sse({
+                        "type": "content",
+                        "content": chunk,
+                    })
+                # todo此处需要重写人工标记
+                yield _format_sse({
+                    "type": "done",
                 })
 
-            # 发送结束标记
-            yield _format_sse({
-                "type": "done",
-            })
 
         except Exception as e:
             logger.error(f"Agent 流式运行出错: {str(e)}")
