@@ -253,10 +253,8 @@ import { v4 as uuidv4 } from "uuid";
 import { useResizeObserver } from "@vueuse/core";
 import { getUseMonaco } from 'markstream-vue'
 import { generateSessionID } from '@/api/ai/addSession'
-import { addChat_message, listChat_message } from '@/api/ai/chatMessage'
-import { listSessions, addSessions } from '@/api/ai/sessions'
 import * as Api from '@/api/ai/chemical'
-import { ElMessage } from "element-plus";
+import { chatWithAgent, chatWithAgentStream } from '@/api/ai/agentChat'
 getUseMonaco()
 
 const { proxy } = getCurrentInstance();
@@ -276,8 +274,6 @@ const isAutoScroll = ref(true);
 const currentSessionAgentData = ref(null);
 const isProgrammaticScroll = ref(false);
 const isAIResponse = ref(1) // 是否是AI响应，1是AI响应，0是人工响应
-const wsClientRef = ref(null);
-const isManualStop = ref(false);
 let scrollTimeout = null;
 const generateThreadId = async () => {
   const res = await generateSessionID()
@@ -289,196 +285,88 @@ const generateThreadId = async () => {
   })
   return res.data
 }
-// 获取session
-const getSession = () => {
-  listSessions({user_id: 'userid_1'}).then(res => {
-    sessionList.value = res.rows || []   
-  })
-}
-// 添加session
-const addSessionToSql = (sessionId) => {
-  addSessions({userId: 'userid_1', sessionId: sessionId}).then(res => {
-    if(res.code == 200) {
-      // ElMessage.success('新建会话成功')
-    }  
-  })
-}
-// 根据sessionId获取信息
-const getMessagesBySessionId = () => {
-  listChat_message({
-    sessionId: currentSessionId.value,
-    pageNum: 1,
-    pageSize: 100000000
-  }).then(res => {
-    if(res.code == 200) {
-      const result = res.rows || []
-      messageList.value = result.map(item => {
-        let role = ''
-        if(item.senderType === 1) {
-          role = 'user'
-        } else if(item.senderType === 2) {
-          role = '我'
-        } else if(item.senderType === 3) {
-          role = 'assistant'
-        } else {
-          role = 'unknown'
-        }
-        return {
-          role: role,
-          content: item.content,
-          createdAt: item.createdAt
-        }
-      })
-    }  
-  })
-}
-// 添加消息
-const addMessage = (data) => {
-  addChat_message(data).then(res => {
-
-  })
-}
 const getAIMessage = async () => {
-  if (loading.value) {
-    stopGeneration();
-    return;
-  }
-
-  const currentInput = inputMessage.value.trim();
-  if (!currentInput && !inputImages.value.length) {
-    return;
-  }
-
+  console.log("getAIMessage called with input:", inputMessage.value);
+  
   if (!currentSessionId.value) {
     await generateThreadId()
   }
-
+  
   messageList.value.push({
     role: "user",
-    content: currentInput,
+    content: inputMessage.value,
   })
-  // 添加session信息
-  addSessionToSql(currentSessionId.value)
-  // 添加用户消息
-  addMessage({
-    sessionId: currentSessionId.value,
-    content: currentInput,
-    senderType: "1"
-  })
+  
   loading.value = true;
-  isManualStop.value = false;
-
+  
   const aiMsgIndex = messageList.value.push({
     role: "assistant",
     content: "",
   }) - 1;
-  inputMessage.value = "";
+  
+  console.log("Added AI message at index:", aiMsgIndex);
+  
   scrollToBottom();
   isAutoScroll.value = true;
-
+  
   try {
-    const wsUrl = import.meta.env.VITE_APP_AGENT_CHAT_WS_URL;
-    if (!wsUrl) {
-      throw new Error("未配置 VITE_APP_AGENT_CHAT_WS_URL");
-    }
-
-    const ws = new WebSocket(wsUrl);
-    wsClientRef.value = ws;
-
+    const response = await chatWithAgentStream({
+      message: inputMessage.value,
+      sessionId: currentSessionId.value,
+      messageType: isAIResponse.value,
+    });
+    
+    console.log("Response received:", response);
+    
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
     let aiContent = "";
-
-    await new Promise((resolve, reject) => {
-      let closedByDone = false;
-
-      ws.onopen = () => {
-        ws.send(
-          JSON.stringify({
-            message: currentInput,
-            sessionId: currentSessionId.value,
-            messageType: isAIResponse.value,
-          })
-        );
-      };
-
-      ws.onmessage = (event) => {
-        const data = parseStreamLine(event.data);
-        if (!data) return;
-
-        if (data.type === "content") {
-          aiContent += data.content || "";
-          if(aiMsgIndex == messageList.value.length) {
-            messageList.value.push({
-              role: "",
-              content: "",
-            })
-          }
-          messageList.value[aiMsgIndex].content = aiContent;
-          scrollToBottom();
-          return;
+    let buffer = "";
+    
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) {
+        break;
+      }
+      
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split("\n");
+      buffer = lines.pop(); // 保留最后一个可能不完整的行
+      
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        const data = parseStreamLine(line);
+        if (!data) continue;
+        if (data.type === "done") {
+          console.log("Received done signal");
+          break;
         }
         if (data.type === "error") {
-          closedByDone = true;
-          proxy.$modal.msgError(data.error || "WebSocket 返回错误");
-          ws.close(1000, "error");
-          return;
+          proxy.$modal.msgError(data.error);
+          break;
         }
-
-        if (data.type === "done") {
-          // 添加用户消息
-          addMessage({
-            sessionId: currentSessionId.value,
-            content: aiContent,
-            senderType: "2"
-          })
-          closedByDone = true;
-          ws.close(1000, "done");
+        if (data.type === "content") {
+          aiContent += data.content || "";
+          messageList.value[aiMsgIndex].content = aiContent;
         }
-      };
-
-      ws.onerror = () => {
-        reject(new Error("WebSocket 连接异常"));
-      };
-
-      ws.onclose = (evt) => {
-        if (wsClientRef.value === ws) {
-          wsClientRef.value = null;
-        }
-
-        if (isManualStop.value || closedByDone || evt.code === 1000) {
-          resolve();
-          return;
-        }
-
-        reject(new Error(evt.reason || `WebSocket 连接关闭(${evt.code})`));
-      };
-    });
+      }
+    }
   } catch (err) {
-    if (!isManualStop.value) {
-      proxy.$modal.msgError("请求失败: " + (err?.message || "未知错误"));
-    }
+    console.error("Error in getAIMessage:", err);
+    proxy.$modal.msgError("请求失败: " + err.message);
   } finally {
-    if (wsClientRef.value) {
-      wsClientRef.value.close(1000, "cleanup");
-      wsClientRef.value = null;
-    }
-
-    if (!isManualStop.value) {
-      inputMessage.value = "";
-    } else {
-      isManualStop.value = false;
-    }
-
     loading.value = false;
+    inputMessage.value = "";
   }
 }
 
-function parseStreamLine(raw) {
-  const text = typeof raw === "string" ? raw.trim() : "";
-  if (!text) return null;
+function parseStreamLine(line) {
+  const trimmedLine = line.trim();
+  if (!trimmedLine) return null;
 
-  const payloadText = text.startsWith("data:")
-    ? text.slice(5).trim()
-    : text;
+  const payloadText = trimmedLine.startsWith("data:")
+    ? trimmedLine.slice(5).trim()
+    : trimmedLine;
 
   if (!payloadText) return null;
   if (payloadText === "[DONE]") return { type: "done" };
@@ -487,30 +375,10 @@ function parseStreamLine(raw) {
   }
 
   try {
-    const parsed = JSON.parse(payloadText);
-    if (parsed?.type) {
-      return parsed;
-    }
-    return { type: "content", content: parsed?.content ?? payloadText };
+    return JSON.parse(payloadText);
   } catch (e) {
     return { type: "content", content: payloadText };
   }
-}
-
-// 停止生成
-function stopGeneration() {
-  isManualStop.value = true;
-  const ws = wsClientRef.value;
-  if (!ws) {
-    loading.value = false;
-    return;
-  }
-
-  if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
-    ws.close(1000, "manual stop");
-  }
-
-  loading.value = false;
 }
 
 const chatConfig = reactive({
@@ -607,8 +475,7 @@ watch(currentModelId, (newVal) => {
 
 // 加载会话历史
 function loadSession(sessionId) {
-  currentSessionId.value = sessionId;
-  getMessagesBySessionId()
+  
 }
 
 function handleDeleteSession(sessionId) {
@@ -637,6 +504,13 @@ function copyText(text) {
       proxy.$modal.msgError("复制失败");
     });
 }
+
+
+// 停止生成
+function stopGeneration() {
+  
+}
+
 function handleScroll(e) {
   if (isProgrammaticScroll.value) return;
 
@@ -691,10 +565,7 @@ useResizeObserver(chatContentRef, () => {
   }
 });
 
-onMounted(async () => {
-  await getSession()
-  currentSessionId.value = sessionList.value.length > 0 ? sessionList.value[0].sessionId : null
-  await getMessagesBySessionId()
+onMounted(() => {
 });
 </script>
 

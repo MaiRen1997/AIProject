@@ -26,3 +26,12 @@ export function chatWithAgentStream(data) {
     body: JSON.stringify(data),
   })
 }
+// 客服回复信息
+
+export function humanResponse(data) {
+  return request({
+    url: baseUrl + "chat/ws/push",
+    method: "post",
+    data: data,
+  });
+}

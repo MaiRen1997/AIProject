@@ -1,115 +1,159 @@
+import asyncio
 import json
-import httpx
-import os
-from fastapi import Request
-from fastapi.responses import StreamingResponse
+from collections.abc import AsyncIterable
+
+from fastapi import WebSocket, WebSocketDisconnect
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, ValidationError
+from pydantic.alias_generators import to_camel
+
 from common.router import APIRouterPro
 from utils.response_util import ResponseUtil
-from agent.agentInstance.agent import run_agent_stream  # 导入流式函数
+from agent.agentInstance.agent import run_agent_stream
 from agent.entity.vo.agent_vo import AgentChatRequest
+from agent.controller.utils.agentFunc import _to_async_iterable
 from utils.log_util import logger
 
 agent_controller = APIRouterPro(prefix='/agent', tags=['AI Agent'])
 
-
-def _format_sse(data) -> str:
-    payload = json.dumps(data, ensure_ascii=False)
-    return f"data: {payload}\n\n"
+# session_id -> queue(events)
+_WS_SESSION_QUEUES: dict[str, asyncio.Queue[dict]] = {}
 
 
-@agent_controller.post('/chat/stream', summary='Agent 对话接口')
-async def agent_chat(request: Request, chat_req: AgentChatRequest):
-    """
-    Agent 对话接口，接收用户输入并返回流式 AI 响应
-    """
-    logger.info(f"收到 Agent 对话请求: {chat_req.message}")
-    # 调用飞书机器人触发警告
-    # 注意：飞书 webhook 对 payload 格式有严格要求。这里使用最简单的 text 格式。
-    # webhook 地址建议放到环境变量或配置中，避免写死在代码里。
-    webhook_url = os.getenv("FEISHU_WEBHOOK_URL") or "https://open.feishu.cn/open-apis/bot/v2/hook/fe239919-994b-4ef1-94a6-560446e10171"
-    payload = {
-        "msg_type": "text",
-        "content": {"text": f"Agent 警告：{chat_req.message[:200]}"}
+class AgentWsPushRequest(BaseModel):
+    """客服端向指定 WebSocket 会话推送回复内容。"""
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+
+    session_id: str
+    message: str = Field(validation_alias=AliasChoices('message', 'messages'))
+    done: bool = True
+
+
+async def _event_stream(chat_req: AgentChatRequest, thread_id: str) -> AsyncIterable[dict]:
+    """AI 流式事件生成器。"""
+    async for chunk in run_agent_stream(chat_req.message, thread_id=thread_id):
+        yield {
+            'type': 'content',
+            'content': chunk,
+        }
+    yield {
+        'type': 'done',
     }
 
-    # 使用异步 HTTP 客户端，避免在 FastAPI 的 async 视图中阻塞线程
-    # try:
-    #     async with httpx.AsyncClient(timeout=10.0) as client:
-    #         resp = await client.post(webhook_url, json=payload)
-    #         logger.info(f"Feishu webhook POST status: {resp.status_code}, body: {resp.text}")
-    #         if resp.status_code >= 400:
-    #             logger.warning("Feishu webhook 返回错误状态，可能未发送成功")
-    # except Exception as ex:
-    #     logger.error(f"调用 Feishu webhook 失败: {ex}")
-    thread_id = chat_req.session_id or "default_thread"
 
-    async def generate_stream():
-        """生成流式响应"""
-        try:
-            if(chat_req.message_type): # AI 生成的回复
-                async for chunk in run_agent_stream(chat_req.message, thread_id=thread_id):
-                    # 使用 Server-Sent Events 格式
-                    yield _format_sse({
-                        "type": "content",
-                        "content": chunk,
-                    })
-
-                # 发送结束标记
-                yield _format_sse({
-                    "type": "done",
-                })
-            else:
-                user_messages = "这是一段人工回复的文字"
-                async for chunk in user_messages:
-                    # 使用 Server-Sent Events 格式
-                    yield _format_sse({
-                        "type": "content",
-                        "content": chunk,
-                    })
-                # todo此处需要重写人工标记
-                yield _format_sse({
-                    "type": "done",
-                })
+def _get_or_create_session_queue(session_id: str) -> asyncio.Queue[dict]:
+    queue = _WS_SESSION_QUEUES.get(session_id)
+    if queue is None:
+        queue = asyncio.Queue()
+        _WS_SESSION_QUEUES[session_id] = queue
+    return queue
 
 
-        except Exception as e:
-            logger.error(f"Agent 流式运行出错: {str(e)}")
-            yield _format_sse({
-                "type": "error",
-                "error": str(e),
-            })
+async def _enqueue_message_events(queue: asyncio.Queue[dict], message: str, done: bool = True) -> None:
+    """将文本拆块后写入队列，供 WebSocket 实时下发。"""
+    async for chunk in _to_async_iterable(message):
+        await queue.put(
+            {
+                'type': 'content',
+                'content': chunk,
+            }
+        )
 
-    return StreamingResponse(
-        generate_stream(),
-        media_type="text/event-stream",  # SSE 格式
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",  # 禁用 Nginx 缓冲
-        }
-    )
+    if done:
+        await queue.put({'type': 'done'})
 
 
-# 可选：保留非流式接口
-@agent_controller.post('/chat/sync', summary='Agent 对话接口（同步）')
-async def agent_chat_sync(chat_req: AgentChatRequest):
-    """
-    同步对话接口（非流式），返回完整响应
-    """
-    from agent.agentInstance.agent import run_agent
+@agent_controller.post('/chat/ws/push', summary='客服推送回复到 WebSocket 会话')
+async def push_ws_chat_message(push_req: AgentWsPushRequest):
+    """另一个客户端调用该接口，将回答数据转发给已连接用户。"""
+    queue = _WS_SESSION_QUEUES.get(push_req.session_id)
+    if queue is None:
+        return ResponseUtil.failure(msg='目标会话未连接或已断开')
 
-    logger.info(f"收到同步 Agent 对话请求: {chat_req.message}")
+    await _enqueue_message_events(queue, push_req.message, done=push_req.done)
+    return ResponseUtil.success(msg='消息已推送到会话')
 
-    thread_id = chat_req.session_id or "default_thread"
+
+@agent_controller.websocket('/chat/ws')
+async def agent_chat_ws(websocket: WebSocket):
+    """用户连接后可注册会话；客服通过 /chat/ws/push 推送后，消息实时转发给该用户。"""
+    await websocket.accept()
+    logger.info('WebSocket 用户会话已连接')
+
+    current_session_id: str | None = None
 
     try:
-        result = run_agent(chat_req.message, thread_id=thread_id)
-        final_response = result["messages"][-1]
-        ai_content = final_response.content
+        while True:
+            # 优先推送客服接口塞入的消息
+            if current_session_id:
+                queue = _WS_SESSION_QUEUES.get(current_session_id)
+                if queue is not None:
+                    try:
+                        event = queue.get_nowait()
+                        await websocket.send_json(event)
+                        continue
+                    except asyncio.QueueEmpty:
+                        pass
 
-        logger.info(f"Agent 响应成功: {ai_content[:50]}...")
-        return ResponseUtil.success(data=ai_content)
+            # 同时允许客户端发注册/对话消息
+            try:
+                raw_text = await asyncio.wait_for(websocket.receive_text(), timeout=0.2)
+            except asyncio.TimeoutError:
+                continue
 
+            if not raw_text or not raw_text.strip():
+                await websocket.send_json({'type': 'error', 'error': 'empty websocket message'})
+                continue
+
+            try:
+                payload = json.loads(raw_text)
+            except json.JSONDecodeError:
+                await websocket.send_json({'type': 'error', 'error': 'invalid json payload'})
+                continue
+
+            if not isinstance(payload, dict):
+                await websocket.send_json({'type': 'error', 'error': 'invalid payload type, json object required'})
+                continue
+
+            # 兼容 messages 字段
+            if 'message' not in payload and 'messages' in payload:
+                payload['message'] = payload['messages']
+
+            try:
+                chat_req = AgentChatRequest.model_validate(payload)
+            except ValidationError as ve:
+                await websocket.send_json(
+                    {
+                        'type': 'error',
+                        'error': 'invalid request fields',
+                        'hint': 'required field: message; optional: sessionId/session_id, messageType/message_type',
+                        'detail': ve.errors(),
+                    }
+                )
+                continue
+
+            session_id = chat_req.session_id or 'default_thread'
+            current_session_id = session_id
+            _get_or_create_session_queue(session_id)
+            await websocket.send_json({'type': 'ready', 'sessionId': session_id})
+
+            # 保留 AI 模式；人工模式等客服 push
+            if chat_req.message_type == 1:
+                async for event in _event_stream(chat_req, thread_id=session_id):
+                    await websocket.send_json(event)
+            else:
+                await websocket.send_json(
+                    {
+                        'type': 'info',
+                        'message': 'messageType != 1，等待客服通过 /agent/chat/ws/push 推送回复',
+                    }
+                )
+
+    except WebSocketDisconnect:
+        logger.info('WebSocket 用户会话已断开')
     except Exception as e:
-        logger.error(f"Agent 运行出错: {str(e)}")
-        return ResponseUtil.error(msg=f"Agent 运行出错: {str(e)}")
+        logger.error(f'WebSocket 会话出错: {str(e)}')
+        await websocket.send_json({'type': 'error', 'error': str(e)})
+        await websocket.close(code=1011)
+    finally:
+        if current_session_id:
+            _WS_SESSION_QUEUES.pop(current_session_id, None)
