@@ -1,6 +1,6 @@
 from typing import Any
 
-from sqlalchemy import delete, select, update
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from common.vo import PageModel
@@ -28,7 +28,8 @@ class SessionsDao:
                 await db.execute(
                     select(UserSessions)
                     .where(
-                        UserSessions.id == id
+                        UserSessions.id == id,
+                        UserSessions.is_deleted == 0,
                     )
                 )
             )
@@ -47,15 +48,11 @@ class SessionsDao:
         :param sessions: 用户会话关联参数对象
         :return: 用户会话关联信息对象
         """
-        sessions_info = (
-            (
-                await db.execute(
-                    select(UserSessions).where(UserSessions.session_id == sessions.session_id if sessions.session_id else True)
-                )
-            )
-            .scalars()
-            .first()
-        )
+        filters = [UserSessions.is_deleted == 0]
+        if sessions.session_id:
+            filters.append(UserSessions.session_id == sessions.session_id)
+
+        sessions_info = ((await db.execute(select(UserSessions).where(*filters))).scalars().first())
 
         return sessions_info
 
@@ -71,17 +68,17 @@ class SessionsDao:
         :param is_page: 是否开启分页
         :return: 用户会话关联列表信息对象
         """
-        query = (
-            select(UserSessions)
-            .where(
-                UserSessions.user_id == query_object.user_id if query_object.user_id else True,
-                UserSessions.session_id == query_object.session_id if query_object.session_id else True,
-                UserSessions.created_at == query_object.created_at if query_object.created_at else True,
-                UserSessions.is_active == query_object.is_active if query_object.is_active else True,
-            )
-            .order_by(UserSessions.id)
-            .distinct()
-        )
+        filters = [UserSessions.is_deleted == 0]
+        if query_object.user_id is not None:
+            filters.append(UserSessions.user_id == query_object.user_id)
+        if query_object.session_id:
+            filters.append(UserSessions.session_id == query_object.session_id)
+        if query_object.created_at:
+            filters.append(UserSessions.created_at == query_object.created_at)
+        if query_object.is_active is not None:
+            filters.append(UserSessions.is_active == query_object.is_active)
+
+        query = select(UserSessions).where(*filters).order_by(UserSessions.id).distinct()
         sessions_list: PageModel | list[dict[str, Any]] = await PageUtil.paginate(
             db, query, query_object.page_num, query_object.page_size, is_page
         )
@@ -97,7 +94,7 @@ class SessionsDao:
         :param sessions: 用户会话关联对象
         :return:
         """
-        db_sessions = UserSessions(**sessions.model_dump(exclude={}))
+        db_sessions = UserSessions(**sessions.model_dump(exclude_none=True, exclude={}))
         db.add(db_sessions)
         await db.flush()
 
@@ -123,5 +120,8 @@ class SessionsDao:
         :param sessions: 用户会话关联对象
         :return:
         """
-        await db.execute(delete(UserSessions).where(UserSessions.id.in_([sessions.id])))
-
+        await db.execute(
+            update(UserSessions)
+            .where(UserSessions.id.in_([sessions.id]), UserSessions.is_deleted == 0)
+            .values(is_deleted=1)
+        )

@@ -38,7 +38,7 @@
               type="danger"
               link
               icon="Delete"
-              @click.stop="handleDeleteSession(session.sessionId)"
+              @click.stop="handleDeleteSession(session.id)"
             ></el-button>
           </div>
           <div
@@ -254,7 +254,7 @@ import { useResizeObserver } from "@vueuse/core";
 import { getUseMonaco } from 'markstream-vue'
 import { generateSessionID } from '@/api/ai/addSession'
 import { addChat_message, listChat_message } from '@/api/ai/chatMessage'
-import { listSessions, addSessions } from '@/api/ai/sessions'
+import { listSessions, addSessions, delSessions } from '@/api/ai/sessions'
 import * as Api from '@/api/ai/chemical'
 import { ElMessage } from "element-plus";
 getUseMonaco()
@@ -290,14 +290,15 @@ const generateThreadId = async () => {
   return res.data
 }
 // 获取session
-const getSession = () => {
-  listSessions({user_id: 'userid_1'}).then(res => {
-    sessionList.value = res.rows || []   
-  })
+const getSession = async () => {
+  const userId = JSON.parse(sessionStorage.getItem('userId'));
+  const res = await listSessions({userId: userId});
+  sessionList.value = res.rows || [];
 }
 // 添加session
 const addSessionToSql = (sessionId) => {
-  addSessions({userId: 'userid_1', sessionId: sessionId}).then(res => {
+  const userId = sessionStorage.getItem('userId');
+  addSessions({userId: userId, sessionId: sessionId}).then(res => {
     if(res.code == 200) {
       // ElMessage.success('新建会话成功')
     }  
@@ -305,6 +306,10 @@ const addSessionToSql = (sessionId) => {
 }
 // 根据sessionId获取信息
 const getMessagesBySessionId = () => {
+  if(!currentSessionId.value) {
+    messageList.value = []
+    return
+  }
   listChat_message({
     sessionId: currentSessionId.value,
     pageNum: 1,
@@ -611,13 +616,18 @@ function loadSession(sessionId) {
   getMessagesBySessionId()
 }
 
-function handleDeleteSession(sessionId) {
+function handleDeleteSession(id) {
   proxy.$modal
     .confirm("是否确认删除该会话？")
     .then(function () {
     })
     .then(() => {
-      
+      delSessions(id).then(res => {
+        if(res.code == 200) {
+          ElMessage.success('删除会话成功')
+          initSessionList()
+        }  
+      })
     })
     .catch(() => {});
 }
@@ -690,11 +700,18 @@ useResizeObserver(chatContentRef, () => {
     scrollToBottom();
   }
 });
-
-onMounted(async () => {
+const initSessionList = async () => {
   await getSession()
   currentSessionId.value = sessionList.value.length > 0 ? sessionList.value[0].sessionId : null
-  await getMessagesBySessionId()
+  if(!currentSessionId.value) {
+    messageList.value = []
+  } else {
+    // 有sessionId,则获取消息
+    await getMessagesBySessionId()
+  }
+}
+onMounted(async () => {
+  await initSessionList()
 });
 </script>
 

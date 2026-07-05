@@ -86,8 +86,6 @@ function toggleReasoning() {
 }
 
 onMounted(() => {
-  console.log("AiMessage mounted");
-  console.log("MarkdownRender component:", MarkdownRender);
 });
 
 // watch(

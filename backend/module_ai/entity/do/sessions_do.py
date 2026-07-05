@@ -16,6 +16,7 @@ class UserSessions(Base):
     session_id = Column(String(64), nullable=False, comment='会话ID')
     created_at = Column(DateTime, nullable=False, comment='创建时间')
     is_active = Column(SmallInteger, nullable=True, comment='是否仍在会话中: 1-是, 0-否')
+    is_deleted = Column(SmallInteger, nullable=False, default=0, comment='是否删除: 1-是, 0-否')
 
 
 

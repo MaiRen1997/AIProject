@@ -18,6 +18,7 @@ class SessionsModel(BaseModel):
     session_id: str | None = Field(default=None, description='会话ID')
     created_at: datetime | None = Field(default=None, description='创建时间')
     is_active: int | None = Field(default=None, description='是否仍在会话中: 1-是, 0-否')
+    is_deleted: int | None = Field(default=None, description='是否删除: 1-是, 0-否')
 
     @NotBlank(field_name='user_id', message='用户ID不能为空')
     def get_user_id(self) -> str | None:

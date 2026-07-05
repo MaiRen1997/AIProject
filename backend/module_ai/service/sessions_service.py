@@ -127,6 +127,7 @@ class SessionsService:
             'sessionId': '会话ID',
             'createdAt': '创建时间',
             'isActive': '是否仍在会话中: 1-是, 0-否',
+            'isDeleted': '是否删除: 1-是, 0-否',
         }
         binary_data = ExcelUtil.export_list2excel(sessions_list, mapping_dict)
 
