@@ -11,6 +11,7 @@ from utils.response_util import ResponseUtil
 from agent.agentInstance.agent import run_agent_stream
 from agent.entity.vo.agent_vo import AgentChatRequest
 from agent.controller.utils.agentFunc import _to_async_iterable
+from module_ai.service.file_embedding_service import FileEmbeddingService
 from utils.log_util import logger
 
 agent_controller = APIRouterPro(prefix='/agent', tags=['AI Agent'])
@@ -28,9 +29,31 @@ class AgentWsPushRequest(BaseModel):
     done: bool = True
 
 
+async def _build_rag_context(question: str) -> str | None:
+    """复用 /ai/embedding/query 同源服务逻辑，先检索知识库再提供给 Agent。"""
+    try:
+        rag_result = await FileEmbeddingService.query_and_generate(question)
+    except Exception as e:
+        logger.warning(f'RAG 检索失败，降级为直接 AI 回答: {e}')
+        return None
+
+    if rag_result.matched_count <= 0:
+        return None
+
+    snippets = []
+    for idx, hit in enumerate(rag_result.hits[:5], start=1):
+        snippets.append(
+            f'[{idx}] 文件: {hit.file_name}, 分块: {hit.chunk_index}, 分数: {hit.score:.4f}\n{hit.content}'
+        )
+
+    joined_snippets = '\n\n'.join(snippets)
+    return f'RAG检索摘要:\n{rag_result.answer}\n\nRAG命中片段:\n{joined_snippets}'
+
+
 async def _event_stream(chat_req: AgentChatRequest, thread_id: str) -> AsyncIterable[dict]:
     """AI 流式事件生成器。"""
-    async for chunk in run_agent_stream(chat_req.message, thread_id=thread_id):
+    rag_context = await _build_rag_context(chat_req.message)
+    async for chunk in run_agent_stream(chat_req.message, thread_id=thread_id, rag_context=rag_context):
         yield {
             'type': 'content',
             'content': chunk,

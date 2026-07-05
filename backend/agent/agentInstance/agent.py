@@ -11,7 +11,6 @@ from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI
 from langchain.agents import create_agent
 from langgraph.checkpoint.memory import InMemorySaver
-from langchain_core.messages import SystemMessage, AIMessageChunk
 from utils.log_util import logger
 # 加载 .env 文件
 BACKEND_ROOT = Path(__file__).resolve().parents[2]
@@ -90,7 +89,20 @@ def create_agent_instance():
 _agent_instance = create_agent_instance()
 
 # ============= 流式运行函数 =============
-async def run_agent_stream(user_input: str, thread_id: str = "default_thread"):
+def _build_grounded_user_input(user_input: str, rag_context: str | None = None) -> str:
+    """将 RAG 检索内容拼接为用户输入，帮助 Agent 基于证据回答。"""
+    if not rag_context:
+        return user_input
+
+    return (
+        "以下是知识库检索结果，请优先基于这些内容回答；若证据不足请明确说明。\n\n"
+        f"{rag_context}\n\n"
+        "用户问题：\n"
+        f"{user_input}"
+    )
+
+
+async def run_agent_stream(user_input: str, thread_id: str = "default_thread", rag_context: str | None = None):
     """
     流式运行Agent，逐步返回输出
 
@@ -102,7 +114,8 @@ async def run_agent_stream(user_input: str, thread_id: str = "default_thread"):
         str: 逐步输出的内容块
     """
     config = {"configurable": {"thread_id": thread_id}}
-    input_messages = {"messages": [("user", user_input)]}
+    grounded_input = _build_grounded_user_input(user_input, rag_context)
+    input_messages = {"messages": [("user", grounded_input)]}
 
     print(f"\n用户输入: {user_input}")
     print("-" * 50)
@@ -138,10 +151,11 @@ async def run_agent_stream(user_input: str, thread_id: str = "default_thread"):
 
 
 # ============= 保留原有的非流式函数（可选） =============
-def run_agent(user_input: str, thread_id: str = "default_thread"):
+def run_agent(user_input: str, thread_id: str = "default_thread", rag_context: str | None = None):
     """非流式运行Agent（向后兼容）"""
     config = {"configurable": {"thread_id": thread_id}}
-    input_messages = {"messages": [("user", user_input)]}
+    grounded_input = _build_grounded_user_input(user_input, rag_context)
+    input_messages = {"messages": [("user", grounded_input)]}
 
     print(f"\n用户输入: {user_input}")
     print("-" * 50)
