@@ -101,7 +101,7 @@ import { generateTextToImage } from "@/api/ai/generateImg";
 
 const { proxy } = getCurrentInstance();
 
-const prompt = ref("");
+const prompt = ref("生成一张雨夜霓虹街道中的赛博朋克猫咪插画");
 const sending = ref(false);
 const messages = ref([]);
 const messagePanelRef = ref(null);

@@ -1,10 +1,13 @@
 import asyncio
 import base64
+import json
 import mimetypes
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlparse
+from urllib.request import Request, urlopen
 import urllib.request
 from datetime import datetime
 
-from openai import OpenAI
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from exceptions.exception import ServiceException
@@ -49,46 +52,43 @@ class TextToImageService:
         return model_config
 
     @classmethod
-    def _build_client(cls, model_config: AiModelModel) -> OpenAI:
+    def _resolve_api_key(cls, model_config: AiModelModel) -> str:
         real_api_key = CryptoUtil.decrypt(model_config.api_key)
         if not real_api_key:
             raise ServiceException(message='当前模型 API Key 解密失败或为空')
-        return OpenAI(api_key=real_api_key, base_url=model_config.base_url or None)
+        return real_api_key
+
+    @classmethod
+    def _resolve_generation_url(cls, model_config: AiModelModel) -> str:
+        base_url = (model_config.base_url or 'https://api.siliconflow.cn/v1').strip().rstrip('/')
+        parsed = urlparse(base_url)
+        path = parsed.path.rstrip('/')
+        if path.endswith('/images/generations'):
+            return base_url
+        if path.endswith('/v1'):
+            return f'{base_url}/images/generations'
+        if '/v1/' in f'{path}/':
+            return f'{base_url}/images/generations'
+        return f'{base_url}/v1/images/generations'
+
+    @classmethod
+    def _build_payload(cls, model_config: AiModelModel, request: TextToImageRequestModel) -> dict:
+        return {
+            'model': model_config.model_code,
+            'prompt': request.prompt,
+            'image_size': request.image_size or '1024x1024',
+            'batch_size': max(1, int(request.batch_size or 1)),
+            'num_inference_steps': max(1, int(request.num_inference_steps or 20)),
+            'guidance_scale': float(request.guidance_scale or 7.5),
+        }
 
     @classmethod
     def _generate_image_sync(
         cls, model_config: AiModelModel, request: TextToImageRequestModel
     ) -> TextToImageResultModel:
-        client = cls._build_client(model_config)
-
-        generate_kwargs = {
-            'model': model_config.model_code,
-            'prompt': request.prompt,
-            'size': request.size or '1024x1024',
-            'quality': request.quality or 'standard',
-            'n': 1,
-        }
-
-        try:
-            response = client.images.generate(**generate_kwargs)
-        except Exception as e:
-            raise ServiceException(message=f'图片生成失败: {e}') from e
-
-        data_list = getattr(response, 'data', None) or []
-        if not data_list:
-            raise ServiceException(message='图片生成失败: 模型未返回图片数据')
-
-        item = data_list[0]
-        image_url = getattr(item, 'url', None)
-        revised_prompt = getattr(item, 'revised_prompt', None)
-        mime_type = 'image/png'
-        image_data_url = None
-
-        b64_json = getattr(item, 'b64_json', None) or getattr(item, 'b64', None)
-        if b64_json:
-            image_data_url = f'data:{mime_type};base64,{b64_json}'
-        elif image_url:
-            image_data_url, mime_type = cls._download_image_as_data_url(image_url)
+        payload = cls._build_payload(model_config, request)
+        response = cls._request_siliconflow_generation(model_config, payload)
+        image_url, image_data_url, revised_prompt, mime_type = cls._extract_image_payload(response)
 
         if not image_data_url and not image_url:
             raise ServiceException(message='图片生成失败: 未获取到可展示的图片内容')
@@ -101,11 +101,75 @@ class TextToImageService:
             revisedPrompt=revised_prompt,
             imageDataUrl=image_data_url,
             imageUrl=image_url,
+            requestId=response.get('requestId') or response.get('request_id'),
             downloadFilename=download_filename,
             modelId=model_config.model_id,
             modelCode=model_config.model_code,
-            provider=model_config.provider or 'OpenAI',
+            provider=model_config.provider or 'SiliconFlow',
         )
+
+    @classmethod
+    def _request_siliconflow_generation(cls, model_config: AiModelModel, payload: dict) -> dict:
+        api_key = cls._resolve_api_key(model_config)
+        target_url = cls._resolve_generation_url(model_config)
+        request_data = json.dumps(payload).encode('utf-8')
+        req = Request(
+            target_url,
+            data=request_data,
+            headers={
+                'Authorization': f'Bearer {api_key}',
+                'Content-Type': 'application/json',
+            },
+            method='POST',
+        )
+
+        try:
+            with urlopen(req, timeout=120) as resp:
+                response_bytes = resp.read()
+        except HTTPError as e:
+            error_body = e.read().decode('utf-8', errors='ignore') if hasattr(e, 'read') else str(e)
+            raise ServiceException(message=f'图片生成失败: HTTP {e.code}, {error_body}') from e
+        except URLError as e:
+            raise ServiceException(message=f'图片生成失败: 无法连接图片服务, {e}') from e
+        except Exception as e:
+            raise ServiceException(message=f'图片生成失败: {e}') from e
+
+        try:
+            response_data = json.loads(response_bytes.decode('utf-8'))
+        except Exception as e:
+            raise ServiceException(message='图片生成失败: 上游返回了无法解析的响应') from e
+
+        if not isinstance(response_data, dict):
+            raise ServiceException(message='图片生成失败: 上游响应格式不正确')
+
+        return response_data
+
+    @classmethod
+    def _extract_image_payload(cls, response: dict) -> tuple[str | None, str | None, str | None, str]:
+        items = response.get('images') or response.get('data') or []
+        if not isinstance(items, list) or not items:
+            raise ServiceException(message=f'图片生成失败: 模型未返回图片数据, response={response}')
+
+        item = items[0] or {}
+        if not isinstance(item, dict):
+            raise ServiceException(message='图片生成失败: 图片结果格式不正确')
+
+        image_url = item.get('url') or item.get('image_url')
+        revised_prompt = item.get('revised_prompt') or response.get('revised_prompt')
+        mime_type = item.get('mime_type') or item.get('content_type') or 'image/png'
+        image_data_url = None
+
+        b64_json = item.get('b64_json') or item.get('b64') or item.get('base64')
+        if b64_json:
+            image_data_url = cls._build_data_url(b64_json, mime_type)
+        elif image_url:
+            image_data_url, mime_type = cls._download_image_as_data_url(image_url)
+
+        return image_url, image_data_url, revised_prompt, mime_type
+
+    @classmethod
+    def _build_data_url(cls, base64_text: str, mime_type: str) -> str:
+        return f'data:{mime_type};base64,{base64_text}'
 
     @classmethod
     def _download_image_as_data_url(cls, image_url: str) -> tuple[str, str]:
