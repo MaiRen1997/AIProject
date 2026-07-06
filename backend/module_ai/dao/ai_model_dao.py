@@ -28,6 +28,23 @@ class AiModelDao:
         return ai_model_info
 
     @classmethod
+    async def get_first_available_image_model(cls, db: AsyncSession) -> AiModels | None:
+        """获取首个启用且支持图片的模型。"""
+
+        ai_model_info = (
+            await db.execute(
+                select(AiModels)
+                .where(
+                    AiModels.status == '0',
+                    AiModels.support_images == 'Y',
+                )
+                .order_by(AiModels.model_sort, AiModels.model_id)
+            )
+        ).scalars().first()
+
+        return ai_model_info
+
+    @classmethod
     async def get_ai_model_list(
         cls, db: AsyncSession, query_object: AiModelPageQueryModel, data_scope_sql: ColumnElement, is_page: bool = False
     ) -> PageModel | list[dict[str, Any]]:

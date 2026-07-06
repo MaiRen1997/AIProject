@@ -31,7 +31,7 @@ sessions_controller = APIRouterPro(
     summary='获取用户会话关联分页列表接口',
     description='用于获取用户会话关联分页列表',
     response_model=PageResponseModel[SessionsModel],
-    dependencies=[UserInterfaceAuthDependency('sessions:sessions:list')],
+    dependencies=[UserInterfaceAuthDependency(['sessions:sessions:list', 'ai:chat:list'])],
 )
 async def get_sessions_sessions_list(
     request: Request,

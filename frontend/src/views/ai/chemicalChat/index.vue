@@ -94,7 +94,7 @@
               </div>
               <div class="message-content-wrapper">
                 <div class="message-sender">
-                  {{ msg.role === "user" ? "我" : "AI 助手" }}
+                  {{ formateRole(msg.role) }}
                   <span class="message-time" v-if="msg.createdAt">{{
                     formatTime(msg.createdAt)
                   }}</span>
@@ -277,8 +277,203 @@ const currentSessionAgentData = ref(null);
 const isProgrammaticScroll = ref(false);
 const isAIResponse = ref(1) // 是否是AI响应，1是AI响应，0是人工响应
 const wsClientRef = ref(null);
+const wsConnected = ref(false);
+const wsSessionId = ref(null);
+const wsConnectPromiseRef = ref(null);
+const currentUserId = ref(sessionStorage.getItem('userId') || `u-${uuidv4().slice(0, 8)}`);
+const aiStreamMessageIndexMap = ref({});
+const pendingAiStreamId = ref(null);
 const isManualStop = ref(false);
 let scrollTimeout = null;
+
+function getWsBaseUrl() {
+  const configuredBase = import.meta.env.VITE_APP_AGENT_WS_BASE_URL;
+  if (configuredBase) {
+    return configuredBase.replace(/\/$/, "");
+  }
+
+  const legacyWsUrl = import.meta.env.VITE_APP_AGENT_CHAT_WS_URL;
+  if (legacyWsUrl) {
+    const idx = legacyWsUrl.indexOf("/agent/");
+    if (idx > -1) {
+      return legacyWsUrl.slice(0, idx + 6);
+    }
+    return legacyWsUrl.replace(/\/$/, "");
+  }
+
+  const wsProtocol = window.location.protocol === "https:" ? "wss" : "ws";
+  return `${wsProtocol}://${window.location.host}/agent`;
+}
+const formateRole = (role) => {
+  if(role === "user") {
+    return '我'
+  } else if(role === "customService") {
+    return '客服'
+  } else if(role === "assistant") {
+    return 'AI 助手'
+  } else {
+    return '未知'
+  }
+}
+function closeWsConnection(reason = "cleanup") {
+  const ws = wsClientRef.value;
+  wsConnected.value = false;
+  wsSessionId.value = null;
+  wsConnectPromiseRef.value = null;
+  if (!ws) return;
+
+  if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
+    ws.close(1000, reason);
+  }
+  wsClientRef.value = null;
+}
+
+function getIncomingMessageRole(senderId, senderType) {
+  if (senderType === 1) return "user";
+  return senderId === currentUserId.value ? "user" : "assistant";
+}
+
+function appendAiStreamChunk(data) {
+  const streamId = data.streamId || "default-ai-stream";
+  const chunk = data.content || "";
+  if (!chunk) return;
+
+  const indexMap = aiStreamMessageIndexMap.value;
+  const existingIndex = indexMap[streamId];
+  if (existingIndex === undefined || !messageList.value[existingIndex]) {
+    const newIndex = messageList.value.push({
+      role: "assistant",
+      content: chunk,
+      createdAt: new Date().toISOString(),
+      streamId,
+      isStreaming: true,
+    }) - 1;
+    indexMap[streamId] = newIndex;
+  } else {
+    const existing = messageList.value[existingIndex];
+    existing.content = `${existing.content || ""}${chunk}`;
+    existing.isStreaming = true;
+  }
+  scrollToBottom();
+}
+
+function finishAiStream(data) {
+  const streamId = data.streamId || "default-ai-stream";
+  const indexMap = aiStreamMessageIndexMap.value;
+  const index = indexMap[streamId];
+  if (index !== undefined && messageList.value[index]) {
+    messageList.value[index].isStreaming = false;
+  }
+  delete indexMap[streamId];
+  if (pendingAiStreamId.value && pendingAiStreamId.value === streamId) {
+    loading.value = false;
+    pendingAiStreamId.value = null;
+  }
+}
+
+function handleWsMessageEvent(data) {
+  if (!data?.type) return;
+
+  if (data.type === "content" && data.senderType === 3) {
+    if (!pendingAiStreamId.value) {
+      pendingAiStreamId.value = data.streamId || "default-ai-stream";
+    }
+    appendAiStreamChunk(data);
+    return;
+  }
+
+  if (data.type === "done" && data.senderType === 3) {
+    finishAiStream(data);
+    return;
+  }
+
+  if (data.type === "message") {
+    const role = getIncomingMessageRole(data.senderId, data.senderType);
+    const content = data.content || "";
+    if (!content) return;
+
+    messageList.value.push({
+      role,
+      content,
+      createdAt: new Date().toISOString(),
+    });
+
+    if (role === "user") {
+      addMessage({
+        sessionId: currentSessionId.value,
+        content,
+        senderType: String(data.senderType || 1),
+        extraData: {
+          isAIResponse: Number(isAIResponse.value),
+        },
+      });
+    } else {
+      addMessage({
+        sessionId: currentSessionId.value,
+        content,
+        senderType: String(data.senderType || 2),
+      });
+    }
+    scrollToBottom();
+    return;
+  }
+
+  if (data.type === "error") {
+    proxy.$modal.msgError(data.error || "WebSocket 返回错误");
+    loading.value = false;
+    pendingAiStreamId.value = null;
+  }
+}
+
+async function ensureSessionWsConnection(sessionId) {
+  if (!sessionId) return;
+
+  const ws = wsClientRef.value;
+  if (ws && wsConnected.value && wsSessionId.value === sessionId && ws.readyState === WebSocket.OPEN) {
+    return;
+  }
+
+  if (wsConnectPromiseRef.value) {
+    await wsConnectPromiseRef.value;
+    return;
+  }
+
+  closeWsConnection("switch-session");
+
+  const wsBase = getWsBaseUrl();
+  const wsUrl = `${wsBase}/chat/client/ws/${encodeURIComponent(sessionId)}/${encodeURIComponent(currentUserId.value)}`;
+  const client = new WebSocket(wsUrl);
+  wsClientRef.value = client;
+  wsSessionId.value = sessionId;
+
+  wsConnectPromiseRef.value = new Promise((resolve, reject) => {
+    client.onopen = () => {
+      wsConnected.value = true;
+      resolve();
+    };
+
+    client.onmessage = (event) => {
+      const data = parseStreamLine(event.data);
+      handleWsMessageEvent(data);
+    };
+
+    client.onerror = () => {
+      wsConnected.value = false;
+      reject(new Error("WebSocket 连接异常"));
+    };
+
+    client.onclose = () => {
+      wsConnected.value = false;
+      if (wsClientRef.value === client) {
+        wsClientRef.value = null;
+      }
+    };
+  }).finally(() => {
+    wsConnectPromiseRef.value = null;
+  });
+
+  await wsConnectPromiseRef.value;
+}
 const generateThreadId = async () => {
   const res = await generateSessionID()
   currentSessionId.value = res.data;
@@ -322,7 +517,7 @@ const getMessagesBySessionId = () => {
         if(item.senderType === 1) {
           role = 'user'
         } else if(item.senderType === 2) {
-          role = '我'
+          role = 'customService'
         } else if(item.senderType === 3) {
           role = 'assistant'
         } else {
@@ -358,122 +553,47 @@ const getAIMessage = async () => {
     await generateThreadId()
   }
 
-  messageList.value.push({
-    role: "user",
-    content: currentInput,
-  })
   // 添加session信息
   addSessionToSql(currentSessionId.value)
-  // 添加用户消息
-  addMessage({
-    sessionId: currentSessionId.value,
-    content: currentInput,
-    senderType: "1"
-  })
-  loading.value = true;
+  loading.value = false;
+  pendingAiStreamId.value = null;
   isManualStop.value = false;
-
-  const aiMsgIndex = messageList.value.push({
-    role: "assistant",
-    content: "",
-  }) - 1;
   inputMessage.value = "";
   scrollToBottom();
   isAutoScroll.value = true;
 
   try {
-    const wsUrl = import.meta.env.VITE_APP_AGENT_CHAT_WS_URL;
-    if (!wsUrl) {
-      throw new Error("未配置 VITE_APP_AGENT_CHAT_WS_URL");
+    await ensureSessionWsConnection(currentSessionId.value);
+    const ws = wsClientRef.value;
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      throw new Error("WebSocket 未连接");
     }
 
-    const ws = new WebSocket(wsUrl);
-    wsClientRef.value = ws;
+    ws.send(
+      JSON.stringify({
+        type: "message",
+        content: currentInput,
+        sessionId: currentSessionId.value,
+        messageType: isAIResponse.value,
+        isAIResponse: isAIResponse.value,
+      })
+    );
 
-    let aiContent = "";
-
-    await new Promise((resolve, reject) => {
-      let closedByDone = false;
-
-      ws.onopen = () => {
-        ws.send(
-          JSON.stringify({
-            message: currentInput,
-            sessionId: currentSessionId.value,
-            messageType: isAIResponse.value,
-          })
-        );
-      };
-
-      ws.onmessage = (event) => {
-        const data = parseStreamLine(event.data);
-        if (!data) return;
-
-        if (data.type === "content") {
-          aiContent += data.content || "";
-          if(aiMsgIndex == messageList.value.length) {
-            messageList.value.push({
-              role: "",
-              content: "",
-            })
-          }
-          messageList.value[aiMsgIndex].content = aiContent;
-          scrollToBottom();
-          return;
-        }
-        if (data.type === "error") {
-          closedByDone = true;
-          proxy.$modal.msgError(data.error || "WebSocket 返回错误");
-          ws.close(1000, "error");
-          return;
-        }
-
-        if (data.type === "done") {
-          // 添加用户消息
-          addMessage({
-            sessionId: currentSessionId.value,
-            content: aiContent,
-            senderType: "2"
-          })
-          closedByDone = true;
-          ws.close(1000, "done");
-        }
-      };
-
-      ws.onerror = () => {
-        reject(new Error("WebSocket 连接异常"));
-      };
-
-      ws.onclose = (evt) => {
-        if (wsClientRef.value === ws) {
-          wsClientRef.value = null;
-        }
-
-        if (isManualStop.value || closedByDone || evt.code === 1000) {
-          resolve();
-          return;
-        }
-
-        reject(new Error(evt.reason || `WebSocket 连接关闭(${evt.code})`));
-      };
-    });
+    if (Number(isAIResponse.value) === 1) {
+      loading.value = true;
+    }
   } catch (err) {
     if (!isManualStop.value) {
       proxy.$modal.msgError("请求失败: " + (err?.message || "未知错误"));
     }
+    loading.value = false;
+    pendingAiStreamId.value = null;
   } finally {
-    if (wsClientRef.value) {
-      wsClientRef.value.close(1000, "cleanup");
-      wsClientRef.value = null;
-    }
-
     if (!isManualStop.value) {
       inputMessage.value = "";
     } else {
       isManualStop.value = false;
     }
-
-    loading.value = false;
   }
 }
 
@@ -505,17 +625,8 @@ function parseStreamLine(raw) {
 // 停止生成
 function stopGeneration() {
   isManualStop.value = true;
-  const ws = wsClientRef.value;
-  if (!ws) {
-    loading.value = false;
-    return;
-  }
-
-  if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
-    ws.close(1000, "manual stop");
-  }
-
   loading.value = false;
+  pendingAiStreamId.value = null;
 }
 
 const chatConfig = reactive({
@@ -614,6 +725,9 @@ watch(currentModelId, (newVal) => {
 function loadSession(sessionId) {
   currentSessionId.value = sessionId;
   getMessagesBySessionId()
+  ensureSessionWsConnection(sessionId).catch((err) => {
+    proxy.$modal.msgError("会话连接失败: " + (err?.message || "未知错误"));
+  });
 }
 
 function handleDeleteSession(id) {
@@ -712,6 +826,15 @@ const initSessionList = async () => {
 }
 onMounted(async () => {
   await initSessionList()
+  if (currentSessionId.value) {
+    ensureSessionWsConnection(currentSessionId.value).catch((err) => {
+      proxy.$modal.msgError("WebSocket 初始化失败: " + (err?.message || "未知错误"));
+    });
+  }
+});
+
+onBeforeUnmount(() => {
+  closeWsConnection("component-unmount");
 });
 </script>
 

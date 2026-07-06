@@ -1,4 +1,5 @@
 from datetime import datetime
+import asyncio
 import uuid
 from typing import Annotated
 
@@ -14,6 +15,7 @@ from common.aspect.pre_auth import CurrentUserDependency, PreAuthDependency
 from common.enums import BusinessType
 from common.router import APIRouterPro
 from common.vo import DataResponseModel, PageResponseModel, ResponseBaseModel
+from agent.controller.agent_controller import trigger_ai_reply_for_chat_message
 from module_admin.entity.vo.user_vo import CurrentUserModel
 from module_ai.service.chat_message_service import Chat_messageService
 from module_ai.entity.vo.chat_message_vo import (
@@ -38,7 +40,8 @@ chat_message_controller = APIRouterPro(
     summary='获取聊天消息分页列表接口',
     description='用于获取聊天消息分页列表',
     response_model=PageResponseModel[Chat_messageModel],
-    dependencies=[UserInterfaceAuthDependency('chat_message:chat_message:list')],
+    # dependencies=[UserInterfaceAuthDependency('chat_message:chat_message:list')],
+    dependencies=[],
 )
 async def get_chat_message_chat_message_list(
     request: Request,
@@ -72,6 +75,23 @@ async def add_chat_message_chat_message(
     add_chat_message.created_at = current_time
     add_chat_message.updated_at = current_time
     add_chat_message_result = await Chat_messageService.add_chat_message_services(query_db, add_chat_message)
+
+    extra_data = add_chat_message.extra_data if isinstance(add_chat_message.extra_data, dict) else {}
+    is_ai_response = extra_data.get('isAIResponse', 1)
+    session_id = add_chat_message.session_id or ''
+    sender_type = int(add_chat_message.sender_type or 0)
+    content = add_chat_message.content or ''
+
+    # 触发 AI 第三聊天者：仅处理用户消息(senderType=1)且 isAIResponse=1，不阻塞当前接口返回
+    asyncio.create_task(
+        trigger_ai_reply_for_chat_message(
+            session_id=session_id,
+            sender_type=sender_type,
+            content=content,
+            is_ai_response=is_ai_response,
+        )
+    )
+
     logger.info(add_chat_message_result.message)
 
     return ResponseUtil.success(msg=add_chat_message_result.message)

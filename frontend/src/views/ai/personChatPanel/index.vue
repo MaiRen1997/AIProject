@@ -243,7 +243,6 @@ import { getUseMonaco } from 'markstream-vue'
 import { generateSessionID } from '@/api/ai/addSession'
 import { addChat_message, listChat_message } from '@/api/ai/chatMessage'
 import * as Api from '@/api/ai/chemical'
-import { humanResponse } from '@/api/ai/agentChat'
 import { listSessions, addSessions } from '@/api/ai/sessions'
 import { InsertRowLeftOutlined } from "@ant-design/icons-vue";
 import { resolveAllPadding } from "@antv/g2plot/lib/utils";
@@ -266,7 +265,180 @@ const isAutoScroll = ref(true);
 const currentSessionAgentData = ref(null);
 const isProgrammaticScroll = ref(false);
 const isAIResponse = ref(0) // 是否是AI响应，1是AI响应，0是人工响应
+const wsClientRef = ref(null);
+const wsConnected = ref(false);
+const wsSessionId = ref(null);
+const wsConnectPromiseRef = ref(null);
+const currentUserId = ref(sessionStorage.getItem('userId') || `staff-${Date.now()}`);
+const aiStreamMessageIndexMap = ref({});
 let scrollTimeout = null;
+
+function getWsBaseUrl() {
+  const configuredBase = import.meta.env.VITE_APP_AGENT_WS_BASE_URL;
+  if (configuredBase) {
+    return configuredBase.replace(/\/$/, "");
+  }
+
+  const legacyWsUrl = import.meta.env.VITE_APP_AGENT_CHAT_WS_URL;
+  if (legacyWsUrl) {
+    const idx = legacyWsUrl.indexOf("/agent/");
+    if (idx > -1) {
+      return legacyWsUrl.slice(0, idx + 6);
+    }
+    return legacyWsUrl.replace(/\/$/, "");
+  }
+
+  const wsProtocol = window.location.protocol === "https:" ? "wss" : "ws";
+  return `${wsProtocol}://${window.location.host}/agent`;
+}
+
+function closeWsConnection(reason = "cleanup") {
+  const ws = wsClientRef.value;
+  wsConnected.value = false;
+  wsSessionId.value = null;
+  wsConnectPromiseRef.value = null;
+  if (!ws) return;
+
+  if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
+    ws.close(1000, reason);
+  }
+  wsClientRef.value = null;
+}
+
+function getIncomingMessageRole(senderId, senderType) {
+  if (senderType === 1) return "user";
+  return "assistant";
+}
+
+function appendAiStreamChunk(data) {
+  const streamId = data.streamId || "default-ai-stream";
+  const chunk = data.content || "";
+  if (!chunk) return;
+
+  const indexMap = aiStreamMessageIndexMap.value;
+  const existingIndex = indexMap[streamId];
+  if (existingIndex === undefined || !messageList.value[existingIndex]) {
+    const newIndex = messageList.value.push({
+      role: "assistant",
+      content: chunk,
+      createdAt: new Date().toISOString(),
+      streamId,
+      isStreaming: true,
+    }) - 1;
+    indexMap[streamId] = newIndex;
+  } else {
+    const existing = messageList.value[existingIndex];
+    existing.content = `${existing.content || ""}${chunk}`;
+    existing.isStreaming = true;
+  }
+  scrollToBottom();
+}
+
+function finishAiStream(data) {
+  const streamId = data.streamId || "default-ai-stream";
+  const indexMap = aiStreamMessageIndexMap.value;
+  const index = indexMap[streamId];
+  if (index !== undefined && messageList.value[index]) {
+    messageList.value[index].isStreaming = false;
+  }
+  delete indexMap[streamId];
+}
+
+function handleWsMessageEvent(data) {
+  if (!data?.type) return;
+
+  if (data.type === "content" && data.senderType === 3) {
+    appendAiStreamChunk(data);
+    return;
+  }
+
+  if (data.type === "done" && data.senderType === 3) {
+    finishAiStream(data);
+    return;
+  }
+
+  if (data.type === "message") {
+    const role = getIncomingMessageRole(data.senderId, data.senderType);
+    const content = data.content || "";
+    if (!content) return;
+
+    messageList.value.push({
+      role,
+      content,
+      createdAt: new Date().toISOString(),
+    });
+
+    if (role === "assistant") {
+      addMessage({
+        sessionId: currentSessionId.value,
+        content,
+        senderType: String(data.senderType || 2),
+      });
+    } else {
+      addMessage({
+        sessionId: currentSessionId.value,
+        content,
+        senderType: String(data.senderType || 1),
+      });
+    }
+    scrollToBottom();
+    return;
+  }
+
+  if (data.type === "error") {
+    proxy.$modal.msgError(data.error || "WebSocket 返回错误");
+  }
+}
+
+async function ensureSessionWsConnection(sessionId) {
+  if (!sessionId) return;
+
+  const ws = wsClientRef.value;
+  if (ws && wsConnected.value && wsSessionId.value === sessionId && ws.readyState === WebSocket.OPEN) {
+    return;
+  }
+
+  if (wsConnectPromiseRef.value) {
+    await wsConnectPromiseRef.value;
+    return;
+  }
+
+  closeWsConnection("switch-session");
+
+  const wsBase = getWsBaseUrl();
+  const wsUrl = `${wsBase}/chat/server/ws/${encodeURIComponent(sessionId)}/${encodeURIComponent(currentUserId.value)}`;
+  const client = new WebSocket(wsUrl);
+  wsClientRef.value = client;
+  wsSessionId.value = sessionId;
+
+  wsConnectPromiseRef.value = new Promise((resolve, reject) => {
+    client.onopen = () => {
+      wsConnected.value = true;
+      resolve();
+    };
+
+    client.onmessage = (event) => {
+      const data = parseStreamLine(event.data);
+      handleWsMessageEvent(data);
+    };
+
+    client.onerror = () => {
+      wsConnected.value = false;
+      reject(new Error("WebSocket 连接异常"));
+    };
+
+    client.onclose = () => {
+      wsConnected.value = false;
+      if (wsClientRef.value === client) {
+        wsClientRef.value = null;
+      }
+    };
+  }).finally(() => {
+    wsConnectPromiseRef.value = null;
+  });
+
+  await wsConnectPromiseRef.value;
+}
 const generateThreadId = async () => {
   const res = await generateSessionID()
   currentSessionId.value = res.data;
@@ -278,7 +450,8 @@ const generateThreadId = async () => {
   return res.data
 }
 const getSession = () => {
-  listSessions({user_id: 'userid_1'}).then(res => {
+  // listSessions({ userId: currentUserId.value }).then(res => {
+  listSessions().then(res => {
     sessionList.value = res.rows || []   
   })
 }
@@ -318,25 +491,47 @@ const addMessage = (data) => {
   })
 }
 const getAIMessage = async () => {
-  console.log("getAIMessage called with input:", inputMessage.value);
-  // 调用接口，返回用户数据
-  humanResponse({
-  sessionId: currentSessionId.value,
-  message: inputMessage.value,
-  done: true
-}).then(res => {
-    if(res.code == 200) {
-      addMessage({
-        sessionId: currentSessionId.value,
-        content: currentInput,
-        senderType: "2"
-      })
+  if (loading.value) {
+    stopGeneration();
+    return;
+  }
+
+  const currentInput = inputMessage.value.trim();
+  if (!currentInput) {
+    return;
+  }
+
+  if (!currentSessionId.value) {
+    proxy.$modal.msgWarning("请先选择会话");
+    return;
+  }
+
+  loading.value = true;
+  try {
+    await ensureSessionWsConnection(currentSessionId.value);
+    const ws = wsClientRef.value;
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      throw new Error("WebSocket 未连接");
     }
-  })
+
+    ws.send(
+      JSON.stringify({
+        type: "message",
+        content: currentInput,
+        sessionId: currentSessionId.value,
+        messageType: isAIResponse.value,
+      })
+    );
+    inputMessage.value = "";
+  } catch (err) {
+    proxy.$modal.msgError("发送失败: " + (err?.message || "未知错误"));
+  } finally {
+    loading.value = false;
+  }
 }
 const getCurrentInfo = () => {
   // 此处需要根据thread_id重新获取用户的数据，避免用户来回之间切换AI，造成人工信息的丢失
-  pass
+  return null
 }
 function parseStreamLine(line) {
   const trimmedLine = line.trim();
@@ -455,6 +650,9 @@ watch(currentModelId, (newVal) => {
 function loadSession(sessionId) {
   currentSessionId.value = sessionId;
   getMessagesBySessionId()
+  ensureSessionWsConnection(sessionId).catch((err) => {
+    proxy.$modal.msgError("会话连接失败: " + (err?.message || "未知错误"));
+  });
 }
 
 function handleDeleteSession(sessionId) {
@@ -487,7 +685,7 @@ function copyText(text) {
 
 // 停止生成
 function stopGeneration() {
-  
+  loading.value = false;
 }
 
 function handleScroll(e) {
@@ -546,6 +744,10 @@ useResizeObserver(chatContentRef, () => {
 
 onMounted(() => {
   getSession()
+});
+
+onBeforeUnmount(() => {
+  closeWsConnection("component-unmount");
 });
 </script>
 
