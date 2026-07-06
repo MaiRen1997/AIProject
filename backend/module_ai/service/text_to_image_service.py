@@ -97,7 +97,7 @@ class TextToImageService:
         if not image_data_url and not image_url:
             raise ServiceException(message='图片生成失败: 未获取到可展示的图片内容')
 
-        extension = mimetypes.guess_extension(mime_type) or '.png'
+        extension = cls._resolve_download_extension(mime_type)
         download_filename = f'text-to-image-{datetime.now().strftime("%Y%m%d%H%M%S")}{extension}'
 
         return TextToImageResultModel(
@@ -160,7 +160,7 @@ class TextToImageService:
 
         image_url = item.get('url') or item.get('image_url')
         revised_prompt = item.get('revised_prompt') or response.get('revised_prompt')
-        mime_type = item.get('mime_type') or item.get('content_type') or 'image/png'
+        mime_type = item.get('mime_type') or item.get('content_type') or 'image/jpeg'
         image_data_url = None
 
         b64_json = item.get('b64_json') or item.get('b64') or item.get('base64')
@@ -172,17 +172,41 @@ class TextToImageService:
         return image_url, image_data_url, revised_prompt, mime_type
 
     @classmethod
+    def _resolve_download_extension(cls, mime_type: str) -> str:
+        normalized = (mime_type or '').lower().strip()
+        if not normalized or normalized == 'application/octet-stream':
+            return '.jpg'
+
+        if normalized in {'image/jpg', 'image/jpeg'}:
+            return '.jpg'
+
+        extension = mimetypes.guess_extension(normalized)
+        if not extension or extension == '.bin':
+            return '.jpg'
+        return extension
+
+    @classmethod
     def _build_data_url(cls, base64_text: str, mime_type: str) -> str:
-        return f'data:{mime_type};base64,{base64_text}'
+        resolved_mime = mime_type if mime_type and mime_type != 'application/octet-stream' else 'image/jpeg'
+        return f'data:{resolved_mime};base64,{base64_text}'
 
     @classmethod
     def _download_image_as_data_url(cls, image_url: str) -> tuple[str, str]:
         try:
             with urllib.request.urlopen(image_url, timeout=30) as resp:
                 image_bytes = resp.read()
-                mime_type = resp.headers.get_content_type() or 'image/png'
+                mime_type = resp.headers.get_content_type() or 'image/jpeg'
         except Exception as e:
             raise ServiceException(message=f'图片已生成，但下载模型返回的图片链接失败: {e}') from e
+
+        if mime_type == 'application/octet-stream':
+            lower_url = (image_url or '').lower()
+            if '.png' in lower_url:
+                mime_type = 'image/png'
+            elif '.webp' in lower_url:
+                mime_type = 'image/webp'
+            else:
+                mime_type = 'image/jpeg'
 
         encoded = base64.b64encode(image_bytes).decode('utf-8')
         return f'data:{mime_type};base64,{encoded}', mime_type
