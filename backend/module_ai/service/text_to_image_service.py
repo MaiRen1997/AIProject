@@ -2,6 +2,7 @@ import asyncio
 import base64
 import json
 import mimetypes
+import os
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
@@ -11,13 +12,8 @@ from datetime import datetime
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from exceptions.exception import ServiceException
-from module_ai.dao.ai_model_dao import AiModelDao
 from module_ai.entity.vo.ai_model_vo import AiModelModel
 from module_ai.entity.vo.text_to_image_vo import TextToImageRequestModel, TextToImageResultModel
-from utils.common_util import CamelCaseUtil
-from utils.crypto_util import CryptoUtil
-
-
 class TextToImageService:
     """文生图服务层。"""
 
@@ -25,38 +21,42 @@ class TextToImageService:
     async def generate_image_services(
         cls, query_db: AsyncSession, request: TextToImageRequestModel
     ) -> TextToImageResultModel:
-        model_config = await cls._load_model_config(query_db, request.model_id)
+        del query_db
+        model_config = cls._load_model_config(request.model_id)
         return await asyncio.to_thread(cls._generate_image_sync, model_config, request)
 
     @classmethod
-    async def _load_model_config(cls, query_db: AsyncSession, model_id: int | None) -> AiModelModel:
-        if model_id:
-            ai_model = await AiModelDao.get_ai_model_detail_by_id(query_db, model_id)
-            if not ai_model:
-                raise ServiceException(message='指定的图片模型不存在')
-        else:
-            ai_model = await AiModelDao.get_first_available_image_model(query_db)
-            if not ai_model:
-                raise ServiceException(message='未找到可用的图片模型，请先在模型管理中配置 supportImages=Y 且状态正常的模型')
+    def _load_model_config(cls, model_id: int | None) -> AiModelModel:
+        del model_id
+        model_code = (
+            os.getenv('AI_IMAGE_MODEL', '').strip()
+            or os.getenv('TEXT_TO_IMAGE_MODEL', '').strip()
+            or 'Kwai-Kolors/Kolors'
+        )
+        base_url = os.getenv('AI_IMAGE_BASE_URL', '').strip() or os.getenv('EMBEDDING_API_BASE_URL', '').strip()
+        provider = os.getenv('AI_IMAGE_PROVIDER', '').strip() or 'SiliconFlow'
 
-        model_config = AiModelModel(**CamelCaseUtil.transform_result(ai_model))
-        if model_config.status != '0':
-            raise ServiceException(message='当前图片模型已停用')
-        if model_config.support_images != 'Y':
-            raise ServiceException(message='当前模型未开启图片生成功能')
-        if not model_config.model_code:
-            raise ServiceException(message='当前模型缺少 model_code 配置')
-        if not model_config.api_key:
-            raise ServiceException(message='当前模型缺少 API Key 配置')
+        if not model_code:
+            raise ServiceException(message='环境变量 AI_IMAGE_MODEL/TEXT_TO_IMAGE_MODEL 未配置，无法调用图片生成服务')
+        if not os.getenv('EMBEDDING_API_KEY', '').strip():
+            raise ServiceException(message='环境变量 EMBEDDING_API_KEY 未配置，无法调用图片生成服务')
 
-        return model_config
+        return AiModelModel(
+            modelId=None,
+            modelCode=model_code,
+            provider=provider,
+            baseUrl=base_url,
+            supportImages='Y',
+            status='0',
+        )
 
     @classmethod
     def _resolve_api_key(cls, model_config: AiModelModel) -> str:
-        real_api_key = CryptoUtil.decrypt(model_config.api_key)
-        if not real_api_key:
-            raise ServiceException(message='当前模型 API Key 解密失败或为空')
-        return real_api_key
+        del model_config
+        api_key = os.getenv('EMBEDDING_API_KEY', '').strip()
+        if not api_key:
+            raise ServiceException(message='环境变量 EMBEDDING_API_KEY 未配置，无法调用图片生成服务')
+        return api_key
 
     @classmethod
     def _resolve_generation_url(cls, model_config: AiModelModel) -> str:
@@ -65,10 +65,14 @@ class TextToImageService:
         path = parsed.path.rstrip('/')
         if path.endswith('/images/generations'):
             return base_url
+        if path.endswith('/embeddings'):
+            base_url = base_url[: -len('/embeddings')]
+            path = urlparse(base_url).path.rstrip('/')
         if path.endswith('/v1'):
             return f'{base_url}/images/generations'
         if '/v1/' in f'{path}/':
-            return f'{base_url}/images/generations'
+            base_root = base_url.split('/v1/', maxsplit=1)[0]
+            return f'{base_root}/v1/images/generations'
         return f'{base_url}/v1/images/generations'
 
     @classmethod

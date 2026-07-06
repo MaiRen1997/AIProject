@@ -36,6 +36,6 @@ class TextToImageResultModel(BaseModel):
     image_url: str | None = Field(default=None, description='模型直接返回的图片链接')
     request_id: str | None = Field(default=None, description='上游请求ID')
     download_filename: str = Field(description='建议下载文件名')
-    model_id: int = Field(description='模型ID')
+    model_id: int | None = Field(default=None, description='模型ID')
     model_code: str = Field(description='模型编码')
     provider: str = Field(description='模型提供商')
