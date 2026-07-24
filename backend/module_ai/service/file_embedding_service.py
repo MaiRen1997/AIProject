@@ -27,13 +27,18 @@ class FileEmbeddingService:
     """
 
     @classmethod
-    def _files_temp_dir(cls) -> Path:
+    def _files_temp_dirs(cls) -> list[Path]:
         backend_dir = Path(__file__).resolve().parents[2]
-        file_temp_dir = backend_dir / 'FileTemp'
-        files_temp_dir = backend_dir / 'FilesTemp'
-        if file_temp_dir.exists():
-            return file_temp_dir
-        return files_temp_dir
+        # Keep both names for backward compatibility across environments.
+        return [backend_dir / 'FilesTemp']
+
+    @classmethod
+    def _resolve_file_path(cls, file_name: str) -> Path:
+        for temp_dir in cls._files_temp_dirs():
+            candidate = temp_dir / file_name
+            if candidate.exists() and candidate.is_file():
+                return candidate
+        return cls._files_temp_dirs()[0] / file_name
 
     @classmethod
     def _sanitize_file_name(cls, file_name: str) -> str:
@@ -78,21 +83,23 @@ class FileEmbeddingService:
 
     @classmethod
     async def list_embedding_files(cls) -> list[EmbeddingFileItemModel]:
-        target_dir = cls._files_temp_dir()
-        target_dir.mkdir(parents=True, exist_ok=True)
-
         items: list[EmbeddingFileItemModel] = []
-        for file in target_dir.iterdir():
-            if not file.is_file():
-                continue
-            stat = file.stat()
-            items.append(
-                EmbeddingFileItemModel(
-                    file_name=file.name,
-                    file_size=stat.st_size,
-                    updated_at=datetime.fromtimestamp(stat.st_mtime).isoformat(),
+        seen_file_names: set[str] = set()
+
+        for target_dir in cls._files_temp_dirs():
+            target_dir.mkdir(parents=True, exist_ok=True)
+            for file in target_dir.iterdir():
+                if not file.is_file() or file.name in seen_file_names:
+                    continue
+                stat = file.stat()
+                items.append(
+                    EmbeddingFileItemModel(
+                        file_name=file.name,
+                        file_size=stat.st_size,
+                        updated_at=datetime.fromtimestamp(stat.st_mtime).isoformat(),
+                    )
                 )
-            )
+                seen_file_names.add(file.name)
         items.sort(key=lambda x: x.updated_at, reverse=True)
         return items
 
@@ -231,7 +238,7 @@ class FileEmbeddingService:
     @classmethod
     async def vectorize_file(cls, file_name: str) -> FileVectorizeResultModel:
         safe_name = cls._sanitize_file_name(file_name)
-        file_path = cls._files_temp_dir() / safe_name
+        file_path = cls._resolve_file_path(safe_name)
         if not file_path.exists() or not file_path.is_file():
             raise ServiceException(message='文件不存在')
 

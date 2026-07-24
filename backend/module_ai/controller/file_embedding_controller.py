@@ -33,7 +33,7 @@ async def get_embedding_files(request: Request) -> Response:
 
 @file_embedding_controller.post(
     '/vectorize',
-    summary='文件向量化并写入ChromaDB',
+    summary='文件向量化并写入1',
     description='加载文件并切块后完成向量化，最终写入ChromaDB',
     response_model=DataResponseModel[FileVectorizeResultModel],
 )
