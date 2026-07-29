@@ -1,10 +1,10 @@
 import request from '@/utils/request'
 
-const baseUrl = '/product_info/'
+const baseUrl = '/product_info'
 // 查询产品组件关联列表
 export function listProduct_info(query) {
   return request({
-    url: baseUrl + 'list',
+    url: baseUrl + '/list',
     method: 'get',
     params: query
   })
@@ -13,7 +13,7 @@ export function listProduct_info(query) {
 // 查询产品组件关联详细
 export function getProduct_info(id) {
   return request({
-    url: baseUrl + id,
+    url: baseUrl + '/' + id,
     method: 'get'
   })
 }
@@ -39,7 +39,7 @@ export function updateProduct_info(data) {
 // 删除产品组件关联
 export function delProduct_info(id) {
   return request({
-    url: baseUrl + id,
+    url: baseUrl + '/' + id,
     method: 'delete'
   })
 }

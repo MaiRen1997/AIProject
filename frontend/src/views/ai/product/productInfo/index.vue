@@ -1,6 +1,6 @@
 <template>
   <div class="app-container">
-    <el-form :model="queryParams" ref="queryRef" :inline="true" v-show="showSearch" label-width="68px">
+    <el-form :model="queryParams" ref="queryRef" :inline="true" v-show="showSearch" label-width="120px">
       <el-form-item label="产品名称" prop="productName">
         <el-input
           v-model="queryParams.productName"
@@ -110,7 +110,7 @@
 
     <!-- 添加或修改产品组件关联对话框 -->
     <el-dialog :title="title" v-model="open" width="500px" append-to-body>
-      <el-form ref="product_infoRef" :model="form" :rules="rules" label-width="80px">
+      <el-form ref="product_infoRef" :model="form" :rules="rules" label-width="100px">
       <el-form-item v-if="renderField(true, true)" label="产品名称" prop="productName">
         <el-input v-model="form.productName" placeholder="请输入产品名称" />
       </el-form-item>
