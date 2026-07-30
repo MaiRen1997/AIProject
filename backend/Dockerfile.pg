@@ -5,7 +5,7 @@ WORKDIR /app
 COPY . .
 
 # 安装依赖
-RUN pip install --no-cache-dir -r requirements-pg.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
+RUN pip install --no-cache-dir --no-build-isolation -r requirements-pg.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
 
 # 暴露端口
 EXPOSE 9099
