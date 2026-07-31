@@ -24,6 +24,16 @@ services:
     container_name: rowen-backend-my
     ports:
       - "19099:9099"
+    environment:
+      DB_HOST: rowen-mysql
+      DB_PORT: 3306
+      DB_USERNAME: rowen
+      DB_PASSWORD: rowen123
+      DB_DATABASE: rowen-fastapi
+      REDIS_HOST: rowen-redis
+      REDIS_PORT: 6379
+      REDIS_USERNAME: ""
+      REDIS_PASSWORD: root
     depends_on:
       rowen-mysql:
         condition: service_healthy
@@ -39,6 +49,8 @@ services:
     environment:
       MYSQL_ROOT_PASSWORD: root
       MYSQL_DATABASE: rowen-fastapi
+      MYSQL_USER: rowen
+      MYSQL_PASSWORD: rowen123
     ports:
       - "13306:3306"
     volumes:
@@ -56,12 +68,13 @@ services:
   rowen-redis:
     image: redis:latest
     container_name: rowen-redis
+    command: ["redis-server", "--requirepass", "root"]
     ports:
       - "16379:6379"
     networks:
       - rowen-network
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD", "redis-cli", "-a", "root", "ping"]
       interval: 5s
       timeout: 10s
       retries: 30
